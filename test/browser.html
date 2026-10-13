@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>selftest</title>
+<link rel="stylesheet" href="../node_modules/codemirror/lib/codemirror.css">
+<link rel="stylesheet" href="../node_modules/codemirror/addon/hint/show-hint.css">
+<link rel="stylesheet" href="../css/app.css">
+<style>#result { position: fixed; left: -9999px; top: 0; }</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar"></div>
+  <div id="docbar"><div id="tabbar"></div></div>
+  <div id="workarea">
+    <div id="editor"></div>
+    <div id="merge" class="hidden">
+      <div id="merge-toolbar"></div>
+      <div id="merge-head">
+        <div class="merge-title left"><span class="merge-badge">左</span><span id="merge-title-left">—</span></div>
+        <div class="merge-title right"><span class="merge-badge">右</span><span id="merge-title-right">—</span></div>
+      </div>
+      <div id="merge-body">
+        <div class="merge-pane left" id="merge-left"></div>
+        <div class="merge-pane right" id="merge-right"></div>
+      </div>
+    </div>
+  </div>
+  <div id="statusbar">
+    <span class="st-item" id="st-file">—</span>
+    <span class="st-item" id="st-stat">—</span>
+    <span class="st-item" id="st-pos">1 行, 1 列</span>
+    <span class="st-item" id="st-sel"></span>
+    <span class="st-spacer"></span>
+    <span class="st-item st-click" id="st-enc">UTF-8</span>
+    <span class="st-item st-click" id="st-nl">CRLF</span>
+    <span class="st-item st-click" id="st-mode">纯文本</span>
+    <span class="st-item" id="st-msg"></span>
+  </div>
+</div>
+<div id="modal-root"></div>
+<div id="drop-hint">drop</div>
+
+<script src="../node_modules/codemirror/lib/codemirror.js"></script>
+<script src="../node_modules/codemirror/addon/mode/loadmode.js"></script>
+<script src="../node_modules/codemirror/addon/edit/matchbrackets.js"></script>
+<script src="../node_modules/codemirror/addon/edit/closebrackets.js"></script>
+<script src="../node_modules/codemirror/addon/selection/active-line.js"></script>
+<script src="../node_modules/codemirror/addon/comment/comment.js"></script>
+<script src="../node_modules/codemirror/addon/hint/show-hint.js"></script>
+<script src="../node_modules/codemirror/addon/hint/anyword-hint.js"></script>
+<script src="../node_modules/encoding-japanese/encoding.js"></script>
+
+<script src="../js/core.js"></script>
+<script src="../js/lang.js"></script>
+<script src="../js/diff.js"></script>
+<script src="../js/format.js"></script>
+<script src="../js/app.js"></script>
+
+<pre id="result"></pre>
+<script>
+(function () {
+  var log = [], pass = 0, fail = 0;
+  function ok(name, cond, extra) {
+    if (cond) { pass++; log.push('PASS | ' + name); }
+    else { fail++; log.push('FAIL | ' + name + (extra ? ' | ' + extra : '')); }
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function flush() { document.getElementById('result').textContent = log.join('\n') + '\n### SELFTEST DONE ### pass=' + pass + ' fail=' + fail; }
+
+  window.onerror = function (msg, src, line) { log.push('FAIL | 脚本异常 | ' + msg + ' @' + line); fail++; flush(); };
+
+  async function run() {
+    var ed = SAK.App.editor;
+    var wrapper = ed.getWrapperElement();
+    ok('编辑器已创建', !!ed && !!ed.getWrapperElement());
+    ok('工具栏已生成', document.querySelectorAll('#toolbar .tbtn').length >= 8, 'buttons=' + document.querySelectorAll('#toolbar .tbtn').length);
+
+    /* ---- 排序 ---- */
+    ed.setValue('banana\napple\ncherry\n');
+    SAK.App.sortLines('asc');
+    ok('Ctrl+Alt+A 升序', ed.getValue() === 'apple\nbanana\ncherry\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('a\nc\nb\n');
+    SAK.App.sortLines('desc');
+    ok('Ctrl+Alt+D 降序', ed.getValue() === 'c\nb\na\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('头\n3\n1\n2\n尾\n');
+    ed.setSelection({ line: 1, ch: 0 }, { line: 3, ch: 1 });
+    SAK.App.sortLines('asc');
+    ok('仅排序选区', ed.getValue() === '头\n1\n2\n3\n尾\n', JSON.stringify(ed.getValue()));
+
+    /* ---- 按键绑定是否真的挂上 ---- */
+    function press(key, mods) {
+      var e = new KeyboardEvent('keydown', Object.assign({ key: key, code: key, bubbles: true, cancelable: true }, mods || {}));
+      ed.getInputField().dispatchEvent(e);
+    }
+    ed.setValue('b\na\n');
+    ed.focus();
+    press('A', { ctrlKey: true, altKey: true, keyCode: 65 });
+    await sleep(60);
+    ok('Ctrl+Alt+A 快捷键生效', ed.getValue() === 'a\nb\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('1\n2\n1\n');
+    press('m', { altKey: true, keyCode: 77 });
+    await sleep(60);
+    ok('Alt+M 快捷键去重', ed.getValue() === '1\n2\n', JSON.stringify(ed.getValue()));
+
+    /* ---- 去重 ---- */
+    ed.setValue('a\nb\na\nc\nb\n');
+    SAK.App.dedupeLines();
+    ok('去重（全文）', ed.getValue() === 'a\nb\nc\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('k\na\na\nb\nz\n');
+    ed.setSelection({ line: 1, ch: 0 }, { line: 3, ch: 1 });
+    SAK.App.dedupeLines();
+    ok('去重（选区）', ed.getValue() === 'k\na\nb\nz\n', JSON.stringify(ed.getValue()));
+
+    /* ---- 粘贴多个文件 → 可点击路径 ---- */
+    ed.setValue('');
+    var dt = new DataTransfer();
+    dt.items.add(new File(['内容一号'], 'note1.txt', { type: 'text/plain' }));
+    dt.items.add(new File(['内容二号'], 'note2.txt', { type: 'text/plain' }));
+    wrapper.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    await sleep(150);
+    ed.refresh();
+    await sleep(60);
+    ok('粘贴 2 个文件变成 2 行路径', ed.getValue() === 'note1.txt\nnote2.txt', JSON.stringify(ed.getValue()));
+    var marks = wrapper.querySelectorAll('.cm-file-path');
+    ok('路径渲染为可点击元素', marks.length === 2, 'marks=' + marks.length);
+
+    if (marks.length) {
+      var before = SAK.App.docs.length;
+      marks[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      await sleep(400);
+      ok('点击路径打开新标签', SAK.App.docs.length === before + 1, 'docs=' + SAK.App.docs.length);
+      var opened = SAK.App.docs[SAK.App.docs.length - 1];
+      ok('打开的文件内容正确', opened.cmDoc.getValue() === '内容一号', JSON.stringify(opened.cmDoc.getValue()));
+    }
+
+    /* ---- 剪贴板同时带真实路径文本时优先显示路径 ---- */
+    SAK.App.newDoc();
+    await sleep(60);
+    ed.setValue('');
+    var dt3 = new DataTransfer();
+    dt3.setData('text/plain', 'C:\\temp\\p.txt');
+    dt3.items.add(new File(['x'], 'p.txt', { type: 'text/plain' }));
+    wrapper.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt3, bubbles: true, cancelable: true }));
+    await sleep(150);
+    ok('优先使用剪贴板里的真实路径', ed.getValue() === 'C:\\temp\\p.txt', JSON.stringify(ed.getValue()));
+
+    /* ---- 拖入「单个」文件 → 直接打开成新标签页 ---- */
+    var hostDoc = SAK.App.newDoc();
+    await sleep(60);
+    var beforeSingle = SAK.App.docs.length;
+    var dropOne = dropWith([{ name: 'dropped.txt', content: '拖进来的内容\n' }]);
+    Object.defineProperty(dropOne, 'pageX', { value: 12 });
+    Object.defineProperty(dropOne, 'pageY', { value: 12 });
+    wrapper.dispatchEvent(dropOne);
+    await waitFor(function () { return SAK.App.docs.length === beforeSingle + 1; });
+    await sleep(150);
+    var openedByDrop = SAK.App.docs[SAK.App.docs.length - 1];
+    ok('拖入单个文件直接打开成新标签页', SAK.App.docs.length === beforeSingle + 1, 'docs=' + SAK.App.docs.length);
+    ok('拖入单个文件：标签名与内容正确',
+      openedByDrop.name === 'dropped.txt' && openedByDrop.cmDoc.getValue() === '拖进来的内容\n',
+      openedByDrop.name + ' | ' + JSON.stringify(openedByDrop.cmDoc.getValue()));
+    ok('拖入单个文件不会改动原文档', hostDoc.cmDoc.getValue() === '', JSON.stringify(hostDoc.cmDoc.getValue()));
+    ok('拖入单个文件会切到这个文档', SAK.App.active === openedByDrop, SAK.App.active && SAK.App.active.name);
+
+    /* ---- 拖入「多个」文件 → 维持原样：插入可点击路径 ---- */
+    var hostDoc2 = SAK.App.newDoc();
+    await sleep(60);
+    var beforeMulti = SAK.App.docs.length;
+    var dropTwo = dropWith([
+      { name: 'drag1.txt', content: '一是' },
+      { name: 'drag2.txt', content: '二是' }
+    ]);
+    Object.defineProperty(dropTwo, 'pageX', { value: 12 });
+    Object.defineProperty(dropTwo, 'pageY', { value: 12 });
+    wrapper.dispatchEvent(dropTwo);
+    await sleep(300);
+    ed.refresh();
+    await sleep(80);
+    ok('拖入多个文件仍插入可点击路径', hostDoc2.cmDoc.getValue() === 'drag1.txt\ndrag2.txt',
+      JSON.stringify(hostDoc2.cmDoc.getValue()));
+    ok('拖入多个文件不新开标签页', SAK.App.docs.length === beforeMulti,
+      'docs=' + SAK.App.docs.length + ' before=' + beforeMulti);
+
+    /* ---- 语法高亮 ---- */
+    ed.setValue('public class A {\n    public static void main(String[] args) {\n        System.out.println("hi");\n    }\n}\n');
+    var langSel = document.getElementById('lang-select');
+    langSel.value = 'java';
+    langSel.dispatchEvent(new Event('change'));
+    await sleep(500);
+    ed.refresh();
+    await sleep(80);
+    ok('Java 模式文件已加载', typeof CodeMirror.modes.clike !== 'undefined');
+    var kws = wrapper.querySelectorAll('.cm-keyword');
+    ok('代码关键字已变色（cm-keyword）', kws.length > 0, 'kw=' + kws.length);
+
+    /* ---- 粘贴后自动识别语言（change origin = +paste） ---- */
+    var d = SAK.App.newDoc();
+    await sleep(50);
+    ed.replaceSelection('import os\n\n\ndef run():\n    print("hi")\n', 'end', '+paste');
+    await sleep(400);
+    ok('粘贴后自动识别为 Python', d.langId === 'python', 'langId=' + d.langId);
+    var plan = SAK.langById(d.langId).label;
+    ok('状态栏语法显示', document.getElementById('st-mode').textContent.indexOf(plan) >= 0,
+      'status=' + document.getElementById('st-mode').textContent);
+
+    /* ---- 格式化 ---- */
+    var javaMessy = 'public class A{\npublic void f(){\nint x=1;\n}\n}\n';
+    var javaOut = await SAK.formatText(javaMessy, 'java', { tabSize: 4 });
+    ok('内置 Java 结构重排', javaOut === 'public class A {\n    public void f() {\n        int x = 1;\n    }\n}\n', JSON.stringify(javaOut));
+
+    var pyOut = await SAK.formatText('def f():\n  x=1\n  return x\n', 'python', { tabSize: 4 });
+    ok('内置 Python 格式化（缩进 + 行内空格）', pyOut === 'def f():\n    x = 1\n    return x\n', JSON.stringify(pyOut));
+
+    var sqlOut = await SAK.formatText('select a,b from t where x=1 and y=2', 'sql', { tabSize: 2 });
+    ok('sql-formatter 已加载并可用', /SELECT/i.test(sqlOut) && /\n/.test(sqlOut), JSON.stringify(sqlOut).slice(0, 120));
+
+    var jsOut = await SAK.formatText('const a=1;function f(x){return x+1;}', 'javascript', { tabSize: 2 });
+    ok('Prettier 格式化 JavaScript', jsOut.indexOf('const a = 1;') >= 0 && jsOut.indexOf('\n') > 0, JSON.stringify(jsOut).slice(0, 160));
+
+    var jsonOut = await SAK.formatText('{"a":1,"b":[1,2]}', 'json', { tabSize: 2 });
+    ok('Prettier 格式化 JSON', jsonOut.indexOf('"a": 1') >= 0, JSON.stringify(jsonOut).slice(0, 120));
+    ok('压缩 JSON 展开为多行缩进', jsonOut === '{\n  "a": 1,\n  "b": [1, 2]\n}\n', JSON.stringify(jsonOut));
+    var jsonLit = await SAK.formatText('{"n":1.0,"big":12345678901234567890,"s":"a\\u00e9b"}', 'json', { tabSize: 2 });
+    ok('JSON 数字/转义字面量原样保留',
+      jsonLit.indexOf('1.0') >= 0 && jsonLit.indexOf('12345678901234567890') >= 0 && jsonLit.indexOf('\\u00e9') >= 0,
+      JSON.stringify(jsonLit));
+
+    var htmlOut = await SAK.formatText('<div><p>a</p><span>b</span></div>', 'html', { tabSize: 2 });
+    ok('Prettier 格式化 HTML', htmlOut.indexOf('<div>') >= 0 && htmlOut.indexOf('\n') > 0, JSON.stringify(htmlOut).slice(0, 160));
+
+    /* ---- 应用到编辑器（走对话框那条路径） ---- */
+    SAK.App.newDoc();
+    ed.setValue('public class B{\nvoid g(){\nint y=2;\n}\n}\n');
+    document.getElementById('lang-select').value = 'java';
+    document.getElementById('lang-select').dispatchEvent(new Event('change'));
+    await sleep(200);
+    SAK.App.openFormatDialog();
+    await sleep(80);
+    var modal = document.querySelector('.overlay .modal');
+    ok('Ctrl+Alt+F 对话框已打开', !!modal);
+    var fmtBtn = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.overlay .modal-foot .btn'), function (b) {
+      if (b.textContent === '格式化') fmtBtn = b;
+    });
+    ok('对话框有格式化按钮', !!fmtBtn);
+    if (fmtBtn) {
+      fmtBtn.click();
+      await sleep(500);
+      ok('对话框格式化已写回编辑器', ed.getValue().indexOf('    void g() {') >= 0, JSON.stringify(ed.getValue()));
+    }
+
+    /* ---- 撤销：格式化可 Ctrl+Z 回退 ---- */
+    ed.undo();
+    await sleep(60);
+    ok('Ctrl+Z 可撤销格式化', ed.getValue().indexOf('void g(){') >= 0, JSON.stringify(ed.getValue()));
+
+    /* ---- 对话框里的 Java / Python 要真的格式化到位 ---- */
+    async function formatViaDialog(text) {
+      var d = SAK.App.newDoc();
+      await sleep(60);
+      ed.setValue('');
+      ed.replaceSelection(text, 'end', '+paste');   // 和真实粘贴同一条路径
+      await sleep(400);
+      SAK.App.openFormatDialog();
+      await sleep(100);
+      var sel = document.querySelector('.overlay .modal select');
+      var picked = sel ? sel.value : '';
+      var btn = null;
+      Array.prototype.forEach.call(document.querySelectorAll('.overlay .modal-foot .btn'), function (b) {
+        if (b.textContent === '格式化') btn = b;
+      });
+      if (btn) btn.click();
+      await sleep(600);
+      return { doc: d, out: d.cmDoc.getValue(), picked: picked };
+    }
+
+    var rj = await formatViaDialog('public class M{\npublic static void main(String[] a){\nint x=1;\nif(x>0){\nSystem.out.println("hi"+x);\n}\n}\n}\n');
+    ok('对话框格式化 Java：语言预选 java', rj.picked === 'java', 'picked=' + rj.picked);
+    ok('对话框格式化 Java：关键字后括号补空格', rj.out.indexOf('if (x > 0) {') >= 0, JSON.stringify(rj.out));
+    ok('对话框格式化 Java：字符串拼接补空格', rj.out.indexOf('"hi" + x') >= 0, JSON.stringify(rj.out));
+    ok('对话框格式化 Java：缩进重排', rj.out.indexOf('\n        int x = 1;') >= 0, JSON.stringify(rj.out));
+
+    var rp = await formatViaDialog('import os\ndef main():\n  x=1\n  if os.path.exists("a"):\n    print(x)\n  return x\n');
+    ok('对话框格式化 Python：语言预选 python', rp.picked === 'python', 'picked=' + rp.picked);
+    ok('对话框格式化 Python：赋值号两侧补空格', rp.out.indexOf('x = 1') >= 0, JSON.stringify(rp.out));
+    ok('对话框格式化 Python：缩进规范为 4 空格', rp.out.indexOf('\n    if os.path.exists') >= 0, JSON.stringify(rp.out));
+
+    /* ---- 挤成一行的 Python 嵌套字典要摊成一项一行 ---- */
+    var pyOneLine = 'data={"name":"张三","age":28,"city":"北京","hobbies":["阅读","跑步","编程"],"isStudent":False,"address":{"street":"中关村大街1号","zip":"100000"}}';
+    var rp1 = await formatViaDialog(pyOneLine);
+    ok('一行 Python 字典：自动识别为 python', rp1.picked === 'python', 'picked=' + rp1.picked);
+    ok('一行 Python 字典：摊成一项一行并缩进',
+      rp1.out.indexOf('data = {\n    "name": "张三",\n    "age": 28,\n    "city": "北京",') >= 0 &&
+      rp1.out.indexOf('\n    "isStudent": False,') >= 0 && rp1.out.indexOf('\n}') >= 0,
+      JSON.stringify(rp1.out));
+    ok('一行 Python 字典：中文与嵌套内容完好',
+      rp1.out.indexOf('"中关村大街1号"') >= 0 && rp1.out.indexOf('["阅读", "跑步", "编程"]') >= 0,
+      JSON.stringify(rp1.out));
+    var rp1b = await SAK.formatText(rp1.out, 'python', { tabSize: 4, printWidth: 100 });
+    ok('一行 Python 字典：格式化结果幂等', rp1b === rp1.out);
+
+    /* ---- 挤成一行的 Java（粘贴过来的常见形态）要能摊成一句一行 ---- */
+    var oneLineJava = 'Map<String, Object> data = new HashMap<>(); data.put("name", "张三"); data.put("age", 28); data.put("city", "北京"); data.put("hobbies", Arrays.asList("阅读", "跑步", "编程")); data.put("isStudent", false); Map<String, Object> address = new HashMap<>(); address.put("street", "中关村大街1号"); address.put("zip", "100000"); data.put("address", address);';
+    var r1 = await formatViaDialog(oneLineJava);
+    ok('一行 Java：自动识别为 java', r1.picked === 'java', 'picked=' + r1.picked);
+    ok('一行 Java：按分号摊成一句一行', r1.out.split('\n').length === 10 &&
+      r1.out.indexOf('\ndata.put("name", "张三");') >= 0, JSON.stringify(r1.out));
+    ok('一行 Java：中文与括号内容完好',
+      r1.out.indexOf('Arrays.asList("阅读", "跑步", "编程")') >= 0 &&
+      r1.out.indexOf('"中关村大街1号"') >= 0, JSON.stringify(r1.out));
+    var r1b = await SAK.formatText(r1.out, 'java', { tabSize: 4 });
+    ok('一行 Java：格式化结果幂等', r1b === r1.out);
+
+    /* ---- 一行写完的类也要摊开 ---- */
+    var r2 = await formatViaDialog('public class A{public static void main(String[] a){int x=1;if(x>0){System.out.println("hi"+x);}}}');
+    ok('一行写完的类被摊开并缩进',
+      r2.out.indexOf('public class A {\n    public static void main(String[] a) {\n        int x = 1;') >= 0 &&
+      r2.out.indexOf('        if (x > 0) {\n            System.out.println("hi" + x);') >= 0,
+      JSON.stringify(r2.out));
+
+    /* ---- 语言还停在纯文本时，打开对话框要自己认出语言（JSON 之外的兜底） ---- */
+    var docPlain = SAK.App.newDoc();
+    await sleep(60);
+    ed.setValue('public class Z{\nvoid f(){\nint x=1;\n}\n}\n');
+    await sleep(150);
+    SAK.App.openFormatDialog();
+    await sleep(120);
+    var selPlain = document.querySelector('.overlay .modal select');
+    ok('纯文本文档打开对话框会自动识别语言', !!selPlain && selPlain.value === 'java',
+      'doc.langId=' + docPlain.langId + ' picked=' + (selPlain && selPlain.value));
+    var cancelBtn = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.overlay .modal-foot .btn'), function (b) {
+      if (b.textContent === '取消') cancelBtn = b;
+    });
+    if (cancelBtn) cancelBtn.click();
+    await sleep(150);
+    ok('取消后对话框已关闭', !document.querySelector('.overlay .modal'));
+
+    /* ---- 编码 / 换行 / 打开保存相关 ---- */
+    ok('编码表可用', SAK.encodingLabel('SJIS') === 'Shift_JIS');
+    var doc = SAK.App.active;
+    var select = document.getElementById('nl-select');
+    select.value = 'LF';
+    select.dispatchEvent(new Event('change'));
+    await sleep(50);
+    ok('切换换行符', doc.newline === 'LF' && doc.isDirty() === true);
+
+    var bytes = SAK.encoding.encode('日本語テスト', 'SJIS');
+    var decoded = SAK.encoding.decode(bytes, 'SJIS');
+    ok('Shift_JIS 编解码', decoded === '日本語テスト');
+
+    /* ---- 状态栏 ---- */
+    ok('状态栏行数统计', /\d+ 行 \/ \d+ 字符/.test(document.getElementById('st-stat').textContent),
+      document.getElementById('st-stat').textContent);
+    ok('没有脚本错误', document.getElementById('st-msg').textContent.indexOf('脚本错误') < 0,
+      document.getElementById('st-msg').textContent);
+
+    /* ---- 快捷键自定义 ---- */
+    var settingsBackup = localStorage.getItem('sakura.settings.v2');
+
+    function rowFor(label) {
+      var rows = document.querySelectorAll('.keymap-table tr');
+      for (var i = 0; i < rows.length; i++) {
+        var tds = rows[i].querySelectorAll('td');
+        if (tds.length >= 3 && tds[0].textContent.indexOf(label) >= 0) {
+          return { cap: tds[1].querySelector('.keycap'), hint: tds[1].querySelector('.km-hint'), reset: tds[2].querySelector('.linkbtn') };
+        }
+      }
+      return null;
+    }
+    function keyEvent(key, code, keyCode, mods) {
+      return new KeyboardEvent('keydown', Object.assign({
+        key: key, code: code, keyCode: keyCode, bubbles: true, cancelable: true
+      }, mods || {}));
+    }
+
+    SAK.App.openKeymapDialog();
+    await sleep(100);
+    var dupRow = rowFor('删除重复行');
+    ok('快捷键设置窗口已打开', !!dupRow && !!document.querySelector('.overlay .modal'));
+
+    dupRow.cap.click();
+    await sleep(40);
+    ok('点击后进入等待按键状态', dupRow.cap.classList.contains('capturing'));
+    window.dispatchEvent(keyEvent('j', 'KeyJ', 74, { ctrlKey: true, altKey: true }));
+    await sleep(80);
+    ok('捕获并保存新快捷键', SAK.settings.keymap['text.dedupe'] === 'Ctrl-Alt-J',
+      JSON.stringify(SAK.settings.keymap));
+    ok('按钮显示新键位', rowFor('删除重复行').cap.textContent === 'Ctrl+Alt+J',
+      rowFor('删除重复行').cap.textContent);
+    ok('已写入 localStorage',
+      JSON.parse(localStorage.getItem('sakura.settings.v2')).keymap['text.dedupe'] === 'Ctrl-Alt-J');
+
+    /* 冲突检测 + Esc 只取消捕获不关窗口 */
+    var ascRow = rowFor('按行升序排序');
+    ascRow.cap.click();
+    await sleep(40);
+    window.dispatchEvent(keyEvent('d', 'KeyD', 68, { ctrlKey: true, altKey: true }));  // 已被「按行降序排序」占用
+    await sleep(60);
+    ok('快捷键冲突时给出提示', ascRow.hint.textContent.indexOf('占用') >= 0, ascRow.hint.textContent);
+    window.dispatchEvent(keyEvent('Escape', 'Escape', 27, {}));
+    await sleep(60);
+    ok('捕获时 Esc 不关闭窗口', !!document.querySelector('.overlay .modal'));
+    ok('冲突的改动未生效', SAK.settings.keymap['text.sortAsc'] === undefined);
+
+    /* 非法快捷键（无修饰键）应被拒绝 */
+    ascRow.cap.click();
+    await sleep(40);
+    window.dispatchEvent(keyEvent('q', 'KeyQ', 81, {}));
+    await sleep(60);
+    ok('拒绝无修饰键的快捷键', ascRow.hint.textContent.indexOf('需要配合') >= 0, ascRow.hint.textContent);
+    window.dispatchEvent(keyEvent('Escape', 'Escape', 27, {}));
+    await sleep(40);
+
+    /* 关闭设置窗口后验证新键位真的生效 */
+    document.querySelector('.overlay .modal-foot .btn.primary').click();
+    await sleep(80);
+    ok('设置窗口已关闭', !document.querySelector('.overlay .modal'));
+
+    ed.focus();
+    ed.setValue('dup\ndup\n');
+    ed.getInputField().dispatchEvent(keyEvent('j', 'KeyJ', 74, { ctrlKey: true, altKey: true }));
+    await sleep(80);
+    ok('新快捷键在编辑器内生效', ed.getValue() === 'dup\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('dup\ndup\n');
+    ed.getInputField().dispatchEvent(keyEvent('m', 'KeyM', 77, { altKey: true }));
+    await sleep(80);
+    ok('旧快捷键已失效（不再去重）', ed.getValue().split('\n').length >= 2, JSON.stringify(ed.getValue()));
+
+    /* 焦点在编辑器外时同样生效 */
+    ed.setValue('b\na\n');
+    var firstBtn = document.querySelector('#toolbar .tbtn');
+    firstBtn.focus();
+    firstBtn.dispatchEvent(keyEvent('a', 'KeyA', 65, { ctrlKey: true, altKey: true }));
+    await sleep(80);
+    ok('焦点在工具栏时快捷键仍生效', ed.getValue() === 'a\nb\n', JSON.stringify(ed.getValue()));
+
+    /* 恢复默认 */
+    SAK.App.openKeymapDialog();
+    await sleep(80);
+    var btnRow = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.overlay .modal-foot .btn'), function (b) {
+      if (b.textContent === '全部恢复默认') btnRow = b;
+    });
+    btnRow.click();
+    await sleep(80);
+    ok('全部恢复默认已清空覆盖', Object.keys(SAK.settings.keymap).length === 0,
+      JSON.stringify(SAK.settings.keymap));
+    ok('界面回到默认键位', rowFor('删除重复行').cap.textContent === 'Alt+M');
+    document.querySelector('.overlay .modal-foot .btn.primary').click();
+    await sleep(60);
+
+    ed.setValue('dup\ndup\n');
+    ed.getInputField().dispatchEvent(keyEvent('m', 'KeyM', 77, { altKey: true }));
+    await sleep(80);
+    ok('恢复默认后 Alt+M 又能去重', ed.getValue() === 'dup\n', JSON.stringify(ed.getValue()));
+
+    /* Tab 被纳入可配置键位后，缩进功能不能被破坏 */
+    SAK.App.newDoc();
+    await sleep(60);
+    ed.setValue('');
+    ed.setCursor({ line: 0, ch: 0 });
+    press('Tab', { keyCode: 9 });
+    await sleep(80);
+    ok('Tab 仍能正常插入缩进', /^ {2,}/.test(ed.getValue()) || /^\t/.test(ed.getValue()), JSON.stringify(ed.getValue()));
+    press('Enter', { keyCode: 13 });
+    await sleep(60);
+    ok('Enter 换行正常（未被快捷键拦截）', ed.getValue().split('\n').length === 2, JSON.stringify(ed.getValue()));
+
+    /* 说明窗口应列出当前键位 */
+    SAK.App.openHelp();
+    await sleep(80);
+    ok('使用说明按注册表生成', document.querySelector('.overlay .modal').textContent.indexOf('删除重复行') >= 0);
+    document.querySelector('.overlay .modal-foot .btn.primary').click();
+    await sleep(60);
+
+    if (settingsBackup === null) localStorage.removeItem('sakura.settings.v2');
+    else localStorage.setItem('sakura.settings.v2', settingsBackup);
+
+    /* ================= 双栏比较 / 合并 ================= */
+    function mkDoc(name, lines) {
+      var d = SAK.App.newDoc();
+      d.name = name;
+      d.cmDoc.setValue(lines.join('\n'));
+      return d;
+    }
+    var M = SAK.mergeState;
+
+    /* --- 选择框：拖拽分配 --- */
+    // 拖放是异步的（要读文件），用轮询等待代替固定 sleep，避免无头环境下的时序抖动
+    async function waitFor(fn, ms) {
+      var t0 = Date.now();
+      for (;;) {
+        try { if (fn()) return true; } catch (e) { }
+        if (Date.now() - t0 > (ms || 4000)) return false;
+        await sleep(50);
+      }
+    }
+    function dropWith(files) {
+      var dt = new DataTransfer();
+      files.forEach(function (f) { dt.items.add(new File([f.content], f.name, { type: 'text/plain' })); });
+      var ev = new Event('drop', { bubbles: true, cancelable: true });
+      // 真实浏览器一定会给 drop 事件挂上 dataTransfer；
+      // 合成事件时若构造器不支持，就手动挂一个行为一致的替身
+      ev.dataTransfer = dt.dataTransfer || dt;
+      if (!ev.dataTransfer || !ev.dataTransfer.files) {
+        ev.dataTransfer = {
+          files: dt.files,
+          types: ['Files'],
+          getData: function () { return ''; }
+        };
+      }
+      return ev;
+    }
+    function slotNames(side) {
+      var b = document.querySelector('.mp-slots .mp-slot.' + side + ' .mp-slot-body');
+      return Array.prototype.map.call(b.querySelectorAll('.mp-chip-name'), function (n) { return n.textContent; }).join(',');
+    }
+    function poolNames() {
+      return Array.prototype.map.call(document.querySelectorAll('.mp-pool .mp-chip-name'), function (n) { return n.textContent; }).join(',');
+    }
+
+    SAK.App.openMergeDialog();
+    await sleep(150);
+    ok('比较对话框已打开', !!document.querySelector('.overlay .modal'));
+    ok('有两个左右拖放区', document.querySelectorAll('.mp-slots .mp-slot').length === 2,
+      String(document.querySelectorAll('.mp-slots .mp-slot').length));
+    ok('有待分配区', !!document.querySelector('.mp-pool'));
+    ok('已打开的标签出现在待分配区', poolNames().length > 0, poolNames());
+    var dlgBody = document.querySelector('.merge-picker');
+
+    /* 拖两个文件进来 → 自动一左一右 */
+    dlgBody.dispatchEvent(dropWith([
+      { name: 'LEFT.txt', content: 'a\nb\nc\n' },
+      { name: 'RIGHT.txt', content: 'a\nX\nc\n' }
+    ]));
+    await waitFor(function () { return slotNames('left') === 'LEFT.txt' && slotNames('right') === 'RIGHT.txt'; });
+    ok('拖入两个文件后左侧自动分配', slotNames('left') === 'LEFT.txt', slotNames('left'));
+    ok('拖入两个文件后右侧自动分配', slotNames('right') === 'RIGHT.txt', slotNames('right'));
+    ok('自动分配后待分配区里没有这两个文件',
+      poolNames().indexOf('LEFT.txt') < 0 && poolNames().indexOf('RIGHT.txt') < 0, poolNames());
+
+    /* 交换左右 */
+    function clickToolbarBtn(text) {
+      Array.prototype.forEach.call(document.querySelectorAll('.mp-toolbar .btn'), function (b) {
+        if (b.textContent.indexOf(text) >= 0) b.click();
+      });
+    }
+    clickToolbarBtn('交换');
+    await sleep(80);
+    ok('交换左右生效', slotNames('left') === 'RIGHT.txt' && slotNames('right') === 'LEFT.txt',
+      slotNames('left') + ' / ' + slotNames('right'));
+    clickToolbarBtn('交换');
+    await sleep(80);
+
+    /* 点 ✕ 移出 → 回到待分配 */
+    document.querySelector('.mp-slots .mp-slot.left .mp-x').click();
+    await sleep(80);
+    ok('✕ 移出后回到待分配区', poolNames().indexOf('LEFT.txt') >= 0 && slotNames('left') === '',
+      poolNames() + ' | left=' + slotNames('left'));
+
+    /* 点待分配里的文件 → 放进空的一侧 */
+    var pooled = Array.prototype.filter.call(document.querySelectorAll('.mp-pool .mp-chip'), function (c) {
+      return c.querySelector('.mp-chip-name').textContent === 'LEFT.txt';
+    })[0];
+    pooled.click();
+    await sleep(80);
+    ok('点一下就能放进左侧', slotNames('left') === 'LEFT.txt', slotNames('left'));
+
+    /* 点「开始比较」进入比较视图 */
+    var startBtn = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.overlay .modal-foot .btn'), function (b) {
+      if (b.textContent.indexOf('开始比较') >= 0) startBtn = b;
+    });
+    ok('底部有开始比较按钮', !!startBtn);
+    startBtn.click();
+    await sleep(500);
+    ok('从选择框成功进入比较视图', SAK.mergeState.on === true);
+    ok('左右标题来自刚分配的文件',
+      document.getElementById('merge-title-left').textContent === 'LEFT.txt' &&
+      document.getElementById('merge-title-right').textContent === 'RIGHT.txt',
+      document.getElementById('merge-title-left').textContent + ' / ' + document.getElementById('merge-title-right').textContent);
+    ok('差异已算出', SAK.mergeState.hunks.length === 1, 'hunks=' + SAK.mergeState.hunks.length);
+    SAK.App.exitMerge(true);
+    await sleep(200);
+
+    /* 只拖一个文件 → 不自动分配，停在待分配区 */
+    SAK.App.openMergeDialog();
+    await sleep(150);
+    var dlgBody2 = document.querySelector('.merge-picker');
+    dlgBody2.dispatchEvent(dropWith([{ name: 'ONLY.txt', content: 'only\n' }]));
+    await waitFor(function () { return poolNames().indexOf('ONLY.txt') >= 0; });
+    ok('只拖一个文件时不自动分配', slotNames('left') === '' && slotNames('right') === '',
+      slotNames('left') + ' / ' + slotNames('right'));
+    ok('单个文件停在待分配区', poolNames().indexOf('ONLY.txt') >= 0, poolNames());
+
+    /* 拖两个文件到「左侧」区 → 左第一、右第二 */
+    document.querySelector('.mp-slots .mp-slot.left').dispatchEvent(dropWith([
+      { name: 'P.txt', content: 'p\n' },
+      { name: 'Q.txt', content: 'q\n' }
+    ]));
+    await waitFor(function () { return slotNames('left') === 'P.txt' && slotNames('right') === 'Q.txt'; });
+    ok('拖到左侧区：第一个归左', slotNames('left') === 'P.txt', slotNames('left'));
+    ok('拖到左侧区：第二个自动归右', slotNames('right') === 'Q.txt', slotNames('right'));
+    document.querySelector('.overlay .modal-foot .btn').click();   // 取消
+    await sleep(150);
+    ok('取消后关闭选择框', !document.querySelector('.overlay .modal'));
+
+    /* --- 修改类差异 --- */
+    var dA = mkDoc('A.txt', ['alpha', 'beta', 'gamma', 'delta', 'epsilon']);
+    var dB = mkDoc('B.txt', ['alpha', 'BETA', 'gamma', 'delta', 'epsilon']);
+    SAK.App.startMerge(dA, dB);
+    await sleep(200);
+
+    ok('已进入比较视图', M.on === true);
+    ok('主工具栏已隐藏', document.getElementById('toolbar').classList.contains('hidden'));
+    ok('标签栏已隐藏', document.getElementById('docbar').classList.contains('hidden'));
+    ok('两块编辑区已出现', !document.getElementById('merge').classList.contains('hidden'));
+    ok('左右标题正确',
+      document.getElementById('merge-title-left').textContent === 'A.txt' &&
+      document.getElementById('merge-title-right').textContent === 'B.txt');
+    ok('两块都渲染出了编辑器',
+      !!document.querySelector('#merge-left .CodeMirror') && !!document.querySelector('#merge-right .CodeMirror'));
+    ok('比较工具栏已生成', document.querySelectorAll('#merge-toolbar .tbtn').length >= 7,
+      String(document.querySelectorAll('#merge-toolbar .tbtn').length));
+
+    /* --- 两个文件颜色不同 --- */
+    var bgL = getComputedStyle(document.querySelector('#merge-left .CodeMirror')).backgroundColor;
+    var bgR = getComputedStyle(document.querySelector('#merge-right .CodeMirror')).backgroundColor;
+    ok('左右两块底色不同', bgL !== bgR, bgL + '  vs  ' + bgR);
+    var hL = getComputedStyle(document.querySelector('.merge-title.left')).backgroundColor;
+    var hR = getComputedStyle(document.querySelector('.merge-title.right')).backgroundColor;
+    ok('左右标题颜色不同', hL !== hR, hL + '  vs  ' + hR);
+
+    /* --- 不一致的文本变色 --- */
+    ok('识别出 1 处差异', M.hunks.length === 1, 'hunks=' + M.hunks.length);
+    var mLeft = M.mLeft, mRight = M.mRight;
+    ok('左侧差异行有底色', String(mLeft.getLineHandle(1).bgClass || '').indexOf('cm-diff-del') >= 0,
+      String(mLeft.getLineHandle(1).bgClass));
+    ok('右侧差异行有底色', String(mRight.getLineHandle(1).bgClass || '').indexOf('cm-diff-ins') >= 0,
+      String(mRight.getLineHandle(1).bgClass));
+    ok('相同的行没有底色', String(mLeft.getLineHandle(0).bgClass || '').indexOf('cm-diff') < 0,
+      String(mLeft.getLineHandle(0).bgClass));
+    ok('当前差异块被额外高亮', String(mLeft.getLineHandle(1).bgClass || '').indexOf('cm-diff-current') >= 0);
+    ok('行内逐词标色已生成', M.wordMarks.length >= 2, 'wordMarks=' + M.wordMarks.length);
+    var wordEls = document.querySelectorAll('#merge-left .cm-diff-word-del');
+    ok('逐词标色渲染到界面', wordEls.length > 0, 'n=' + wordEls.length);
+    if (wordEls.length) {
+      var wb = getComputedStyle(wordEls[0]).backgroundColor;
+      ok('逐词标色是可见的颜色', wb && wb !== 'rgba(0, 0, 0, 0)' && wb !== 'transparent', wb);
+    }
+
+    /* --- 导航 --- */
+    ok('状态栏显示差异数', document.getElementById('st-stat').textContent.indexOf('1 处差异') >= 0,
+      document.getElementById('st-stat').textContent);
+    SAK.App.gotoHunk(0);
+    await sleep(60);
+    ok('跳到第 1 处差异', M.idx === 0 && document.getElementById('st-pos').textContent.indexOf('1 / 1') >= 0,
+      document.getElementById('st-pos').textContent);
+
+    /* --- 用右侧覆盖左侧（合并动作） --- */
+    SAK.App.applyHunk('toLeft');
+    await sleep(200);
+    ok('覆盖后左侧变成右侧内容', mLeft.getValue().split('\n')[1] === 'BETA', JSON.stringify(mLeft.getValue()));
+    ok('覆盖后两边一致、差异清零', mLeft.getValue() === mRight.getValue() && M.hunks.length === 0,
+      'hunks=' + M.hunks.length);
+
+    /* --- 撤销可回退合并动作 --- */
+    mLeft.undo();
+    await sleep(250);
+    ok('Ctrl+Z 可撤销合并动作', mLeft.getValue().split('\n')[1] === 'beta', JSON.stringify(mLeft.getValue()));
+
+    /* --- 插入 / 删除用占位行对齐 --- */
+    SAK.App.exitMerge(true);
+    await sleep(150);
+    ok('退出比较视图', M.on === false && !document.getElementById('toolbar').classList.contains('hidden'));
+
+    var dC = mkDoc('C.txt', ['a', 'b', 'c']);
+    var dD = mkDoc('D.txt', ['a', 'x', 'y', 'b', 'c']);
+    SAK.App.startMerge(dC, dD);
+    await sleep(250);
+    ok('检测到插入块', M.hunks.length === 1 && M.hunks[0].type === 'insert', JSON.stringify(M.hunks));
+    var ph = document.querySelector('#merge-left .cm-phantom-stack');
+    ok('左侧插入占位行（斜纹块）', !!ph);
+    if (ph) {
+      var h = M.mLeft.defaultTextHeight();
+      ok('占位高度正好是 2 行', Math.abs(parseFloat(ph.style.height) - 2 * h) < 1.5,
+        ph.style.height + ' vs ' + (2 * h) + 'px');
+    }
+    ok('右侧多出的行有新增底色', String(mRight.getLineHandle(1).bgClass || '').indexOf('cm-diff-ins') >= 0);
+
+    /* --- 应用后占位消失 --- */
+    M.idx = 0;
+    SAK.App.applyHunk('toRight');
+    await sleep(250);
+    ok('应用后两边一致', M.mLeft.getValue() === M.mRight.getValue(), JSON.stringify(M.mLeft.getValue()));
+    ok('应用后占位块已移除', !document.querySelector('#merge-left .cm-phantom-stack'));
+
+    /* --- 滚动同步 --- */
+    SAK.App.exitMerge(true);
+    await sleep(150);
+    var longA = [], longB = [];
+    for (var li = 0; li < 400; li++) {
+      longA.push('line ' + li);
+      longB.push(li === 200 ? 'LINE 200 changed' : 'line ' + li);
+    }
+    var dE = mkDoc('longA.txt', longA);
+    var dF = mkDoc('longB.txt', longB);
+    SAK.App.startMerge(dE, dF);
+    await sleep(250);
+    M.mLeft.scrollTo(0, 600);
+    // 说明：无头 Chrome 不派发 scroll 事件（实测 evL=0），真实浏览器会自动派发。
+    // 这里手动补一次，用来验证「滚动 → 同步」这条逻辑本身。
+    M.mLeft.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(150);
+    ok('左右滚动同步', Math.abs(M.mLeft.getScrollInfo().top - M.mRight.getScrollInfo().top) < 3,
+      M.mLeft.getScrollInfo().top + ' vs ' + M.mRight.getScrollInfo().top);
+    M.mRight.scrollTo(0, 1200);
+    M.mRight.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(150);
+    ok('反向滚动同样同步', Math.abs(M.mLeft.getScrollInfo().top - M.mRight.getScrollInfo().top) < 3,
+      M.mLeft.getScrollInfo().top + ' vs ' + M.mRight.getScrollInfo().top);
+    SAK.App.gotoHunk(0);
+    await sleep(200);
+    ok('跳转后滚动仍在同一位置',
+      Math.abs(M.mLeft.getScrollInfo().top - M.mRight.getScrollInfo().top) < 3,
+      M.mLeft.getScrollInfo().top + ' vs ' + M.mRight.getScrollInfo().top);
+
+    /* --- F2 标记 + 点另一边：滚动对齐（差异结果不变） --- */
+    function pressOn(cm, key, keyCode) {
+      cm.getInputField().dispatchEvent(new KeyboardEvent('keydown', {
+        key: key, code: key, keyCode: keyCode, bubbles: true, cancelable: true
+      }));
+    }
+    function clickLine(cm, line) {
+      var c = cm.charCoords({ line: line, ch: 0 }, 'page');
+      var ev = new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true, clientX: c.left + 4, clientY: c.top + 4
+      });
+      Object.defineProperty(ev, 'pageX', { value: c.left + 4 });
+      Object.defineProperty(ev, 'pageY', { value: c.top + 4 });
+      cm.getWrapperElement().dispatchEvent(ev);
+    }
+    function anchorViewportDiff(cm1, l1, cm2, l2) {
+      var r1 = cm1.getScrollerElement().getBoundingClientRect();
+      var r2 = cm2.getScrollerElement().getBoundingClientRect();
+      var y1 = cm1.charCoords({ line: l1, ch: 0 }, 'page').top - r1.top;
+      var y2 = cm2.charCoords({ line: l2, ch: 0 }, 'page').top - r2.top;
+      return Math.abs(Math.round(y1 - y2));
+    }
+
+    var mLeft = M.mLeft, mRight = M.mRight;
+    var hunksBeforeAnchor = M.hunks.length;
+
+    // 同一侧再点一下：只是把标记挪过去，还没完成对齐
+    mLeft.scrollTo(0, 0);
+    mLeft.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(200);
+    mLeft.setCursor({ line: 10, ch: 0 });
+    M.focus = mLeft;
+    pressOn(mLeft, 'F2', 113);
+    await sleep(120);
+    clickLine(mLeft, 18);
+    await sleep(120);
+    ok('同一侧再点只是移动标记（还没完成对齐）',
+      !!M.pending && M.pending.side === 'left' && M.pending.line === 18 && !M.anchors.length,
+      JSON.stringify(M.pending) + ' anchors=' + JSON.stringify(M.anchors));
+
+    // 让第 120 行落在左侧视口顶部，再从右侧视口底部挑一行来点
+    mLeft.scrollIntoView({ line: 120, ch: 0 }, 0);
+    mLeft.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(200);
+    var vh = mLeft.getScrollInfo().clientHeight;
+    var clickTarget = mRight.lineAtHeight(mRight.getScrollInfo().top + vh - 30, 'local');
+    var phantomsBefore = document.querySelectorAll('#merge-left .cm-phantom-stack').length;
+
+    mLeft.setCursor({ line: 120, ch: 0 });
+    M.focus = mLeft;
+    pressOn(mLeft, 'F2', 113);
+    await sleep(150);
+    ok('F2 标记了左侧对齐起点', !!M.pending && M.pending.side === 'left' && M.pending.line === 120,
+      JSON.stringify(M.pending));
+    ok('待对齐的行有高亮标记',
+      String(mLeft.getLineHandle(120).bgClass || '').indexOf('cm-merge-anchor-pending') >= 0,
+      String(mLeft.getLineHandle(120).bgClass || ''));
+    ok('状态栏提示等待点另一边', document.getElementById('st-pos').textContent.indexOf('待对齐') >= 0,
+      document.getElementById('st-pos').textContent);
+
+    clickLine(mRight, clickTarget);
+    await sleep(300);
+    ok('点另一边后对齐生效（左 120 ↔ 右 ' + clickTarget + '）',
+      M.anchors.length === 1 && M.anchors[0].left === 120 && M.anchors[0].right === clickTarget, JSON.stringify(M.anchors));
+    ok('两侧锚点行排在同一行上', anchorViewportDiff(mLeft, 120, mRight, clickTarget) <= 3,
+      'diff=' + anchorViewportDiff(mLeft, 120, mRight, clickTarget));
+    ok('靠下的那一侧补了占位块',
+      document.querySelectorAll('#merge-left .cm-phantom-stack').length +
+      document.querySelectorAll('#merge-right .cm-phantom-stack').length > phantomsBefore,
+      'before=' + phantomsBefore);
+    ok('两侧锚点行都有高亮标记',
+      String(mLeft.getLineHandle(120).bgClass || '').indexOf('cm-merge-anchor') >= 0 &&
+      String(mRight.getLineHandle(clickTarget).bgClass || '').indexOf('cm-merge-anchor') >= 0,
+      String(mLeft.getLineHandle(120).bgClass) + ' | ' + String(mRight.getLineHandle(clickTarget).bgClass));
+    ok('差异结果没被改动（hunks 数量不变、当前差异也没跳）',
+      M.hunks.length === hunksBeforeAnchor && M.idx >= 0,
+      'hunks=' + M.hunks.length + '/' + hunksBeforeAnchor + ' idx=' + M.idx);
+
+    // 两边仍然 1:1 同步滚动（对齐是靠占位块做出来的，不靠滚动偏移）
+    mLeft.scrollTo(0, 2400);
+    mLeft.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(150);
+    ok('对齐后仍然 1:1 同步滚动', Math.abs(mRight.getScrollInfo().top - 2400) < 3,
+      mRight.getScrollInfo().top + ' vs 2400');
+    mRight.scrollTo(0, 3000);
+    mRight.getScrollerElement().dispatchEvent(new Event('scroll'));
+    await sleep(150);
+    ok('反向滚动同样 1:1', Math.abs(mLeft.getScrollInfo().top - 3000) < 3,
+      mLeft.getScrollInfo().top + ' vs 3000');
+    ok('对齐后跳差异仍保持对齐', (function () {
+      SAK.App.gotoHunk(0);
+      return Math.abs(M.mLeft.getScrollInfo().top - M.mRight.getScrollInfo().top) < 3;
+    })(), mLeft.getScrollInfo().top + ' vs ' + mRight.getScrollInfo().top);
+
+    var clearBtn = null;
+    Array.prototype.forEach.call(document.querySelectorAll('#merge-toolbar .tbtn'), function (b) {
+      if (b.textContent === '清除对齐') clearBtn = b;
+    });
+    ok('工具栏有「清除对齐」按钮', !!clearBtn);
+    if (clearBtn) clearBtn.click();
+    await sleep(300);
+    ok('清除后锚点标记消失、占位块回到按差异自动算',
+      !M.anchors.length && !M.pending &&
+      String(mLeft.getLineHandle(120).bgClass || '').indexOf('cm-merge-anchor') < 0 &&
+      document.querySelectorAll('#merge-left .cm-phantom-stack').length +
+      document.querySelectorAll('#merge-right .cm-phantom-stack').length === phantomsBefore,
+      JSON.stringify(M.anchors) + ' phantoms=' + document.querySelectorAll('#merge-left .cm-phantom-stack').length);
+
+    /* --- 用户给的例子：左 111/222/start ↔ 右 3333/111/111/start --- */
+    SAK.App.exitMerge(true);
+    await sleep(150);
+    var dP = mkDoc('p.txt', ['111', '222', 'start']);
+    var dQ = mkDoc('q.txt', ['3333', '111', '111', 'start']);
+    SAK.App.startMerge(dP, dQ);
+    await sleep(300);
+    var hunksP = M.hunks.length;
+
+    mRight.setCursor({ line: 1, ch: 0 });          // 右边第 2 行
+    M.focus = mRight;
+    pressOn(mRight, 'F2', 113);
+    await sleep(150);
+    ok('右侧按 F2 标记了第 2 行', !!M.pending && M.pending.side === 'right' && M.pending.line === 1,
+      JSON.stringify(M.pending));
+    clickLine(mLeft, 0);                            // 点左边第 1 行
+    await sleep(300);
+    ok('左 111 与右边第 2 行排在同一行',
+      anchorViewportDiff(M.mLeft, 0, M.mRight, 1) <= 3,
+      'diff=' + anchorViewportDiff(M.mLeft, 0, M.mRight, 1));
+    ok('例子里两边内容都对得上',
+      M.mLeft.getLine(0) === '111' && M.mRight.getLine(1) === '111' &&
+      anchorViewportDiff(M.mLeft, 2, M.mRight, 3) <= 3,
+      'start 行 diff=' + anchorViewportDiff(M.mLeft, 2, M.mRight, 3));
+
+    mRight.setCursor({ line: 2, ch: 0 });          // 右边第 3 行
+    M.focus = mRight;
+    pressOn(mRight, 'F2', 113);
+    await sleep(150);
+    clickLine(M.mLeft, 0);                          // 还是点左边第 1 行
+    await sleep(300);
+    ok('改标记后：左 111 与右边第 3 行排在同一行',
+      M.anchors.length === 1 && M.anchors[0].left === 0 && M.anchors[0].right === 2 &&
+      anchorViewportDiff(M.mLeft, 0, M.mRight, 2) <= 3,
+      JSON.stringify(M.anchors) + ' diff=' + anchorViewportDiff(M.mLeft, 0, M.mRight, 2));
+    ok('重排后 start 那两行仍然对齐',
+      anchorViewportDiff(M.mLeft, 2, M.mRight, 3) <= 3,
+      'diff=' + anchorViewportDiff(M.mLeft, 2, M.mRight, 3));
+    ok('例子里差异结果始终没变', M.hunks.length === hunksP, M.hunks.length + '/' + hunksP);
+    SAK.App.exitMerge(true);
+    await sleep(150);
+
+    /* --- 多对累积：右2↔左1 之后再配 右3↔左2，第一对不能被顶掉 --- */
+    var dM1 = mkDoc('m1.txt', ['aaa', 'bbb', 'ccc']);
+    var dM2 = mkDoc('m2.txt', ['111', 'aaa', 'aaa', 'ccc', 'bbb']);
+    SAK.App.startMerge(dM1, dM2);
+    await sleep(300);
+    var hunksM = M.hunks.length;
+
+    M.mRight.setCursor({ line: 1, ch: 0 });        // 右边第 2 行
+    M.focus = M.mRight;
+    pressOn(M.mRight, 'F2', 113);
+    await sleep(150);
+    clickLine(M.mLeft, 0);                          // 左边第 1 行
+    await sleep(300);
+    ok('第 1 对生效：左1 ↔ 右2',
+      M.anchors.length === 1 && anchorViewportDiff(M.mLeft, 0, M.mRight, 1) <= 3,
+      JSON.stringify(M.anchors) + ' diff=' + anchorViewportDiff(M.mLeft, 0, M.mRight, 1));
+
+    M.mRight.setCursor({ line: 2, ch: 0 });        // 右边第 3 行
+    M.focus = M.mRight;
+    pressOn(M.mRight, 'F2', 113);
+    await sleep(150);
+    clickLine(M.mLeft, 1);                          // 左边第 2 行
+    await sleep(300);
+    ok('第 2 对生效：左2 ↔ 右3，两对都在',
+      M.anchors.length === 2 && anchorViewportDiff(M.mLeft, 1, M.mRight, 2) <= 3,
+      JSON.stringify(M.anchors) + ' diff=' + anchorViewportDiff(M.mLeft, 1, M.mRight, 2));
+    ok('配第二对时第一对没有被取消（左1 仍对齐右2）',
+      anchorViewportDiff(M.mLeft, 0, M.mRight, 1) <= 3,
+      'diff=' + anchorViewportDiff(M.mLeft, 0, M.mRight, 1));
+    ok('下面的相同行（ccc）也跟着对齐',
+      anchorViewportDiff(M.mLeft, 2, M.mRight, 3) <= 3,
+      'diff=' + anchorViewportDiff(M.mLeft, 2, M.mRight, 3));
+    ok('多对累积时差异结果仍然不变', M.hunks.length === hunksM, M.hunks.length + '/' + hunksM);
+    ok('四行都标上了对齐高亮',
+      String(M.mLeft.getLineHandle(0).bgClass || '').indexOf('cm-merge-anchor') >= 0 &&
+      String(M.mLeft.getLineHandle(1).bgClass || '').indexOf('cm-merge-anchor') >= 0 &&
+      String(M.mRight.getLineHandle(1).bgClass || '').indexOf('cm-merge-anchor') >= 0 &&
+      String(M.mRight.getLineHandle(2).bgClass || '').indexOf('cm-merge-anchor') >= 0,
+      [M.mLeft.getLineHandle(0).bgClass, M.mLeft.getLineHandle(1).bgClass,
+        M.mRight.getLineHandle(1).bgClass, M.mRight.getLineHandle(2).bgClass].join(' | '));
+    ok('状态栏显示 2 对对齐', document.getElementById('st-pos').textContent.indexOf('行对齐 2 对') >= 0,
+      document.getElementById('st-pos').textContent);
+    SAK.App.exitMerge(true);
+    await sleep(150);
+
+    ok('F2 已注册成可自定义快捷键', SAK.App.currentKeyOf('merge.anchor') === 'F2',
+      'key=' + SAK.App.currentKeyOf('merge.anchor'));
+    ok('F12 作为别名键也能触发', (function () {
+      var extra = ed.getOption('extraKeys') || {};
+      return !!extra['F2'] && !!extra['F12'];
+    })(), Object.keys(ed.getOption('extraKeys') || {}).filter(function (k) { return /^F1?2?$/.test(k); }).join(','));
+    ok('「比较合并」分组里能查到这两个新命令', (function () {
+      var ids = (SAK.App.commands || []).filter(function (c) { return c.group === '比较合并'; })
+        .map(function (c) { return c.id; });
+      return ids.indexOf('merge.anchor') >= 0 && ids.indexOf('merge.anchorClear') >= 0;
+    })(), (SAK.App.commands || []).filter(function (c) { return c.group === '比较合并'; })
+      .map(function (c) { return c.id; }).join(','));
+    SAK.App.startMerge(dP, dQ);
+    await sleep(250);
+
+    /* --- 选项 --- */
+    SAK.App.exitMerge(true);
+    await sleep(150);
+    var dG = mkDoc('G.txt', ['x  ', 'y']);
+    var dH = mkDoc('H.txt', ['x', 'y']);
+    SAK.App.startMerge(dG, dH);
+    await sleep(250);
+    ok('默认不忽略行尾空白 → 有差异', M.hunks.length === 1, 'hunks=' + M.hunks.length);
+    var ignCb = document.querySelectorAll('#merge-toolbar input[type="checkbox"]')[0];
+    ignCb.checked = true;
+    ignCb.dispatchEvent(new Event('change'));
+    await sleep(250);
+    ok('勾选忽略行尾空白后无差异', M.hunks.length === 0, 'hunks=' + M.hunks.length);
+
+    /* --- 比较时也能用排序 / 去重 / 格式化 --- */
+    M.mRight.setValue('b\na\nb\n');
+    await sleep(500);
+    M.focus = M.mRight;
+    SAK.App.dedupeLines(M.mRight);
+    await sleep(500);
+    ok('比较视图里 Alt+M 去重可用', M.mRight.getValue() === 'b\na\n', JSON.stringify(M.mRight.getValue()));
+    SAK.App.sortLines('asc', M.mRight);
+    await sleep(500);
+    ok('比较视图里排序可用', M.mRight.getValue() === 'a\nb\n', JSON.stringify(M.mRight.getValue()));
+
+    /* --- 保存左右侧会写回对应文档 --- */
+    var beforeSave = dG.cmDoc.getValue();
+    M.focus = M.mRight;
+    dH.handle = null;
+    SAK.App.saveDoc = SAK.App.saveDoc;   // 保留引用（真实保存会走下载，这里只验证写回）
+    M.mRight.setValue('merged by test\n');
+    await sleep(100);
+    var realSave = SAK.App.saveDoc;
+    ok('保存前右侧文档内容未变', dH.cmDoc.getValue() === 'x\ny', JSON.stringify(dH.cmDoc.getValue()));
+
+    /* --- 退出 --- */
+    SAK.App.exitMerge(true);
+    await sleep(200);
+    ok('再次退出比较正常', M.on === false);
+    ok('退出比较后行对齐已被清掉', !M.anchors.length && !M.pending,
+      JSON.stringify(M.anchors) + ' pending=' + JSON.stringify(M.pending));
+    ok('主编辑器恢复显示', !document.getElementById('editor').classList.contains('hidden'));
+    ok('右边文档内容仍为合并前的值（未点保存不写回）', dH.cmDoc.getValue() === 'x\ny',
+      JSON.stringify(dH.cmDoc.getValue()));
+    ok('左侧文档未被动过', dG.cmDoc.getValue() === beforeSave);
+
+    /* --- 快捷键已在注册表中 --- */
+    ok('比较命令可自定义快捷键',
+      SAK.App.currentKeyOf('merge.open') === 'Ctrl-Alt-M' &&
+      SAK.App.currentKeyOf('merge.next') === 'F7' &&
+      SAK.App.currentKeyOf('merge.toRight') === 'Ctrl-Alt-Right',
+      [SAK.App.currentKeyOf('merge.open'), SAK.App.currentKeyOf('merge.next')].join('/'));
+
+    /* --- 非比较视图下按 F2：只提示，不报错、不留状态 --- */
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'F2', code: 'F2', keyCode: 113, bubbles: true, cancelable: true
+    }));
+    await sleep(150);
+    ok('非比较视图按 F2 只给提示', !M.pending && !M.anchors.length &&
+      document.getElementById('st-msg').textContent.indexOf('比较视图') >= 0,
+      'msg=' + document.getElementById('st-msg').textContent);
+
+    /* --- 键名顺序必须与 CodeMirror 的查表键名一致，否则 extraKeys 里查不到 --- */
+    (function () {
+      var probes = [
+        ['file.saveAs', 83, { ctrlKey: true, shiftKey: true }],
+        ['format.open', 70, { ctrlKey: true, altKey: true }],
+        ['file.save', 83, { ctrlKey: true }],
+        ['text.dedupe', 77, { altKey: true }],
+        ['edit.comment', 191, { ctrlKey: true }]
+      ];
+      var extra = ed.getOption('extraKeys') || {};
+      var bad = probes.filter(function (p) {
+        var name = SAK.App.currentKeyOf(p[0]);
+        var cmName = CodeMirror.keyName(Object.assign({ keyCode: p[1] }, p[2]));
+        return name !== cmName || !(cmName in extra);
+      });
+      ok('编辑器快捷键键名与 CodeMirror 一致（含 Shift+Ctrl 组合）', bad.length === 0,
+        bad.map(function (p) {
+          return p[0] + ': ' + SAK.App.currentKeyOf(p[0]) + ' vs ' +
+            CodeMirror.keyName(Object.assign({ keyCode: p[1] }, p[2]));
+        }).join(' | '));
+    })();
+
+    flush();
+  }
+
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      run().catch(function (e) {
+        fail++;
+        log.push('FAIL | 测试过程抛出异常 | ' + (e && e.stack ? e.stack.split('\n')[0] : e));
+        flush();
+      });
+    }, 120);
+  });
+})();
+</script>
+</body>
+</html>

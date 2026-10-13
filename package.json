@@ -1,0 +1,16 @@
+{
+  "name": "sakura-like-editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "文本编辑器 - 复刻 Sakura Editor 常用功能的本地 Web 文本编辑器",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "codemirror": "5.65.16",
+    "encoding-japanese": "2.2.0",
+    "js-beautify": "^1.15.1",
+    "prettier": "^2.8.8",
+    "sql-formatter": "^15.4.6"
+  }
+}

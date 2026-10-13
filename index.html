@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文本编辑器</title>
+
+<link rel="stylesheet" href="node_modules/codemirror/lib/codemirror.css">
+<link rel="stylesheet" href="node_modules/codemirror/addon/hint/show-hint.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="app">
+  <div id="toolbar"></div>
+
+  <div id="docbar">
+    <div id="tabbar"></div>
+  </div>
+
+  <div id="workarea">
+    <div id="editor"></div>
+
+    <div id="merge" class="hidden">
+      <div id="merge-toolbar"></div>
+      <div id="merge-head">
+        <div class="merge-title left">
+          <span class="merge-badge">左</span>
+          <span id="merge-title-left">—</span>
+        </div>
+        <div class="merge-title right">
+          <span class="merge-badge">右</span>
+          <span id="merge-title-right">—</span>
+        </div>
+      </div>
+      <div id="merge-body">
+        <div class="merge-pane left" id="merge-left"></div>
+        <div class="merge-pane right" id="merge-right"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="statusbar">
+    <span class="st-item" id="st-file">—</span>
+    <span class="st-item" id="st-stat">—</span>
+    <span class="st-item" id="st-pos">1 行, 1 列</span>
+    <span class="st-item" id="st-sel"></span>
+    <span class="st-spacer"></span>
+    <span class="st-item st-click" id="st-enc" title="当前文字编码">UTF-8</span>
+    <span class="st-item st-click" id="st-nl" title="当前换行符">CRLF</span>
+    <span class="st-item st-click" id="st-mode" title="语法高亮">纯文本</span>
+    <span class="st-item" id="st-msg"></span>
+  </div>
+</div>
+
+<div id="modal-root"></div>
+<div id="drop-hint">松开鼠标 → 单个文件直接打开，多个文件插入可点击路径</div>
+
+<!-- CodeMirror 5 核心 -->
+<script src="node_modules/codemirror/lib/codemirror.js"></script>
+<script src="node_modules/codemirror/addon/mode/loadmode.js"></script>
+<script src="node_modules/codemirror/addon/edit/matchbrackets.js"></script>
+<script src="node_modules/codemirror/addon/edit/closebrackets.js"></script>
+<script src="node_modules/codemirror/addon/selection/active-line.js"></script>
+<script src="node_modules/codemirror/addon/comment/comment.js"></script>
+<script src="node_modules/codemirror/addon/hint/show-hint.js"></script>
+<script src="node_modules/codemirror/addon/hint/anyword-hint.js"></script>
+
+<!-- 日文/中文编码转换 -->
+<script src="node_modules/encoding-japanese/encoding.js"></script>
+
+<!-- 应用 -->
+<script src="js/core.js"></script>
+<script src="js/lang.js"></script>
+<script src="js/diff.js"></script>
+<script src="js/format.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
