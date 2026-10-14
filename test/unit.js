@@ -6,6 +6,9 @@ require('../js/core.js');
 require('../js/lang.js');
 require('../js/diff.js');
 require('../js/format.js');
+require('../js/textops.js');
+
+var translateMod = require('../translate.js');
 
 var SAK = global.SAK;
 var pass = 0, fail = 0;
@@ -297,6 +300,31 @@ section('JSON 格式化（异步，结果见末尾）');
     try { await SAK.formatText('{"a" 1}', 'json', { tabSize: 2 }); } catch (e) { bad = e; }
     ok('非法 JSON 抛出可读错误', !!bad && /Unexpected token/.test(String(bad.message)),
       bad && String(bad.message).split('\n')[0]);
+
+    /* ---- 翻译提供方链：前一个失败就自动换下一个（不联网，用假请求顶替 https） ----
+     * 放在这个 async 块里是因为整个测试文件只有这里会等 Promise（末尾统一 finish）。 */
+    var chainCalls = [];
+    var tr = await translateMod.translateText('hello', 'auto', 'zh-CN', {
+      request: function (built) {
+        chainCalls.push(built.url);
+        if (built.url.indexOf('transmart') >= 0) return Promise.reject(new Error('模拟超时'));
+        return Promise.resolve('{"errorCode":"0","translation":["你好"]}');
+      }
+    });
+    eq('翻译失败后自动换下一个提供方', [tr.provider, tr.text, chainCalls.length], ['有道翻译', '你好', 2]);
+
+    var allFail = null;
+    try {
+      await translateMod.translateText('hello', 'auto', 'zh-CN', {
+        request: function () { return Promise.reject(new Error('断网')); }
+      });
+    } catch (e) { allFail = e; }
+    ok('全部提供方失败时给出可读错误',
+      !!allFail && /翻译服务不可用/.test(allFail.message) &&
+      ['腾讯交互翻译', '有道翻译', 'Google 翻译', 'MyMemory'].every(function (l) {
+        return String(allFail.detail || '').indexOf(l) >= 0;
+      }),
+      allFail && (allFail.message + ' | ' + allFail.detail));
   })().then(finish).catch(function (e) {
     fail++;
     console.log('  FAIL  JSON 格式化测试异常\n        ' + (e && e.stack || e));
@@ -417,6 +445,169 @@ section('行内词级差分');
   segs = SAK.diff.words('foo bar baz', 'foo qux baz');
   var changed = segs.filter(function (s) { return s.type !== 'equal'; });
   eq('只有中间词不同', changed.map(function (s) { return s.type + '=' + s.text; }), ['del=bar', 'ins=qux']);
+})();
+
+/* ---------------- 大小写 / 标点 / 批量替换 ---------------- */
+section('大小写转换');
+(function () {
+  var r = SAK.textops.toUpper('hello World 123 中文');
+  eq('小写转大写', r.text, 'HELLO WORLD 123 中文');
+  eq('只数真正改动的字符', r.count, 9);
+
+  r = SAK.textops.toLower('Hello WORLD 123 中文');
+  eq('大写转小写', r.text, 'hello world 123 中文');
+  eq('大写转小写的改动数', r.count, 6);
+
+  eq('本来就全大写 → 0 处改动', SAK.textops.toUpper('ABC').count, 0);
+  eq('没有字母 → 0 处改动', SAK.textops.toUpper('123，。！').count, 0);
+  eq('空字符串不报错', SAK.textops.toUpper('').text, '');
+})();
+
+section('中英标点 / 全角半角转换');
+(function () {
+  var r = SAK.textops.convertPunctuation('你好，世界！这是“测试”（第一行）。', 'zh2en');
+  eq('中 → 英标点', r.text, '你好,世界!这是"测试"(第一行).');
+  ok('中 → 英有改动计数', r.count > 0, r.count);
+
+  r = SAK.textops.convertPunctuation('Hello, world! This is a test.', 'en2zh');
+  eq('英 → 中标点', r.text, 'Hello， world！ This is a test。');
+
+  r = SAK.textops.convertPunctuation('圆周率是 3.14, 时间是 10:30。', 'en2zh');
+  eq('小数点 / 千分位 / 时间里的标点原样保留', r.text, '圆周率是 3.14， 时间是 10:30。');
+
+  r = SAK.textops.convertPunctuation('He said "hi" and don\'t worry.', 'en2zh');
+  eq('引号成对、撇号识别成 ’', r.text, 'He said “hi” and don’t worry。');
+
+  r = SAK.textops.convertPunctuation('括号() 与 方括号[]', 'en2zh');
+  eq('圆括号方括号 → 中文括号', r.text, '括号（） 与 方括号【】');
+
+  r = SAK.textops.convertPunctuation('省略号……和破折号——', 'zh2en');
+  eq('省略号与破折号', r.text, '省略号...和破折号-');
+
+  r = SAK.textops.convertPunctuation('ＡＢＣ １２３', 'zh2en', { alnum: true });
+  eq('全角字母数字 → 半角（开了 alnum）', r.text, 'ABC 123');
+
+  r = SAK.textops.convertPunctuation('ＡＢＣ，１２３', 'zh2en');
+  eq('不开 alnum 时只动标点，字母数字留着', r.text, 'ＡＢＣ,１２３');
+
+  r = SAK.textops.convertPunctuation('abc, def', 'en2zh', { alnum: true });
+  eq('半角 → 全角（开了 alnum）', r.text, 'ａｂｃ， ｄｅｆ');
+})();
+
+section('批量文字替换');
+(function () {
+  var r = SAK.textops.batchReplace('foo foo', [{ find: 'foo', to: 'bar' }, { find: 'bar', to: 'baz' }], {});
+  eq('多条规则按顺序依次应用', r.text, 'baz baz');
+  eq('每条规则的命中数', r.perRule, [2, 2]);
+  eq('总命中数', r.count, 4);
+
+  r = SAK.textops.batchReplace('Foo foo', [{ find: 'foo', to: 'X' }], {});
+  eq('默认忽略大小写', r.text, 'X X');
+
+  r = SAK.textops.batchReplace('Foo foo', [{ find: 'foo', to: 'X' }], { caseSensitive: true });
+  eq('区分大小写时只替换大小写一致的', r.text, 'Foo X');
+
+  r = SAK.textops.batchReplace('a.b.c', [{ find: '.', to: '-' }], {});
+  eq('普通模式里 . 是字面量（自动转义）', r.text, 'a-b-c');
+
+  r = SAK.textops.batchReplace('a1b2', [{ find: '([a-z])(\\d)', to: '$2$1' }], { regex: true });
+  eq('正则模式支持 $1 反向引用', r.text, '1a2b');
+
+  r = SAK.textops.batchReplace('价格 $5 和 $6', [{ find: '$', to: '￥' }], {});
+  eq('替换内容里的 $ 不会被当成反向引用', r.text, '价格 ￥5 和 ￥6');
+
+  r = SAK.textops.batchReplace('a\nb', [{ find: '\\n', to: ' ' }], {});
+  eq('查找框里可以用 \\n 表示换行', r.text, 'a b');
+
+  r = SAK.textops.batchReplace('abc', [{ find: 'b', to: '' }], {});
+  eq('替换为空就是删除', r.text, 'ac');
+
+  r = SAK.textops.batchReplace('a', [{ find: '', to: 'x' }], {});
+  eq('空规则被跳过', [r.text, r.count, r.perRule[0]], ['a', 0, 0]);
+
+  var threw = false;
+  try { SAK.textops.batchReplace('a', [{ find: '(', to: 'x' }], { regex: true }); } catch (e) { threw = true; }
+  ok('非法正则会抛错（对话框据此提示第几条）', threw);
+
+  eq('转义后的字面量正则', SAK.textops.escapeRegExp('a+b*c?'), 'a\\+b\\*c\\?');
+  eq('首个差异位置', SAK.textops.firstDiff('abc', 'axc'), 1);
+  eq('完全相同 → -1', SAK.textops.firstDiff('abc', 'abc'), -1);
+  eq('前缀相同但更长 → 长度位置', SAK.textops.firstDiff('abc', 'abcd'), 3);
+})();
+
+section('翻译方向判定与分块');
+(function () {
+  eq('纯英文 → 翻成中文', SAK.textops.detectTranslateTarget('Hello world, this is a test.'), 'zh-CN');
+  eq('纯中文 → 翻成英文', SAK.textops.detectTranslateTarget('你好，这是一段中文。'), 'en');
+  eq('中文里夹几个英文词 → 仍翻成英文',
+    SAK.textops.detectTranslateTarget('请把这段文字翻译成 Hello World 那种写法。'), 'en');
+  eq('英文里夹中文名字 → 仍翻成中文',
+    SAK.textops.detectTranslateTarget('Li Hua (李华) is a student from China.'), 'zh-CN');
+  eq('纯符号 → 默认翻成中文', SAK.textops.detectTranslateTarget('123 ??'), 'zh-CN');
+
+  function rejoin(parts) {
+    return parts.map(function (p, i) { return (i ? p.sep : '') + p.text; }).join('');
+  }
+
+  var parts = SAK.textops.splitForTranslate('第一行\n第二行', 100);
+  eq('短文本只有一块', parts.length, 1);
+  eq('块内容与分隔符', [parts[0].text, parts[0].sep], ['第一行\n第二行', '']);
+
+  parts = SAK.textops.splitForTranslate('aaa\nbbb\nccc', 3);
+  eq('按行分块', parts.map(function (p) { return p.text; }), ['aaa', 'bbb', 'ccc']);
+  eq('行间分隔符是换行', parts.map(function (p) { return p.sep; }), ['', '\n', '\n']);
+
+  parts = SAK.textops.splitForTranslate('abcdefg', 3);
+  eq('超长单行硬切', parts.map(function (p) { return p.text; }), ['abc', 'def', 'g']);
+  eq('硬切出来的块之间不加分隔符', parts.map(function (p) { return p.sep; }), ['', '', '']);
+
+  var original = '第一行内容\n第二行内容\n第三行内容\n';
+  eq('分块后拼回去 = 原文', rejoin(SAK.textops.splitForTranslate(original, 6)), original);
+  eq('硬切分块拼回去 = 原文', rejoin(SAK.textops.splitForTranslate('a'.repeat(10), 3)), 'a'.repeat(10));
+  eq('空字符串也有一块（避免调用方拿到空数组）', SAK.textops.splitForTranslate('').length, 1);
+})();
+
+section('翻译提供方：请求构造与响应解析（不联网）');
+(function () {
+  var T = translateMod;
+  eq('目标语言归一化', [T.normalizeTarget('en'), T.normalizeTarget('zh-CN'), T.normalizeTarget('')], ['en', 'zh', 'zh']);
+  eq('提供方顺序（国内可直连的排前面）', T.providers.map(function (p) { return p.name; }),
+    ['tencent', 'youdao', 'google', 'mymemory']);
+
+  var tencent = T.providerByName('tencent');
+  var built = tencent.build('hello', 'auto', 'zh-CN');
+  eq('腾讯接口是 POST', [built.method, built.url], ['POST', 'https://transmart.qq.com/api/imt']);
+  ok('腾讯请求体包含待翻译文字与功能名',
+    built.body.indexOf('hello') >= 0 && built.body.indexOf('auto_translation') >= 0, built.body);
+  var parsed = tencent.parse('{"header":{"ret_code":"succ"},"auto_translation":["你好世界"],"src_lang":"en","tgt_lang":"zh"}');
+  eq('腾讯响应解析', [parsed.text, parsed.from, parsed.to], ['你好世界', 'en', 'zh']);
+  var bad = false;
+  try { tencent.parse('{"header":{"ret_code":"fail"}}'); } catch (e) { bad = true; }
+  ok('腾讯 ret_code 非 succ 时报错', bad);
+
+  var youdao = T.providerByName('youdao');
+  eq('有道响应解析（多行合并）', youdao.parse('{"errorCode":"0","translation":["你好","世界"]}').text, '你好\n世界');
+  eq('有道请求 URL 带 Auto 方向', /from=Auto&to=Auto/.test(youdao.build('你好', 'auto', 'en').url), true);
+  bad = false;
+  try { youdao.parse('{"errorCode":"50"}'); } catch (e) { bad = true; }
+  ok('有道错误码报错', bad);
+
+  var google = T.providerByName('google');
+  eq('Google 响应解析（多段拼接）',
+    google.parse('[[["你好世界","hello world",null,null,10]],null,"en"]').text, '你好世界');
+  bad = false;
+  try { google.parse('{"unexpected":1}'); } catch (e) { bad = true; }
+  ok('Google 返回格式异常时报错', bad);
+
+  var mymemory = T.providerByName('mymemory');
+  eq('MyMemory 响应解析',
+    mymemory.parse('{"responseData":{"translatedText":"你好"},"responseStatus":200}').text, '你好');
+  eq('MyMemory 按目标语决定语向', /langpair=zh-CN%7Cen/.test(mymemory.build('你好', 'auto', 'en').url), true);
+  bad = false;
+  try {
+    mymemory.parse('{"responseData":{"translatedText":"QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500 CHARS"}}');
+  } catch (e) { bad = true; }
+  ok('MyMemory 超长提示当成错误', bad);
 })();
 
 function finish() {

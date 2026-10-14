@@ -419,6 +419,25 @@ body[data-theme="dark"] .mp-slot-body .mp-chip { background: #2b2e35; }
 }
 #drop-hint.show { display: flex; }
 
+/* ===== 批量替换 / 标点转换对话框 ===== */
+.rule-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.rule-row { display: flex; align-items: center; gap: 6px; }
+.rule-row .grow { flex: 1 1 50%; min-width: 0; }
+.rule-row.bad input[type="text"] { border-color: #d9534f; }
+.rule-row .rule-del { flex: 0 0 auto; color: var(--gutter-fg); text-decoration: none; font-size: 13px; }
+.rule-row .rule-del:hover { color: #d9534f; }
+.rep-count { flex: 0 0 68px; font-size: 11px; color: var(--gutter-fg); text-align: right; }
+.rep-summary { font-size: 12px; line-height: 1.6; }
+.rep-summary .warn, .warn { color: #d9534f; }
+.rep-preview {
+  margin: 6px 0 0; padding: 7px 9px; max-height: 150px; overflow: auto;
+  background: var(--editor-bg); border: 1px solid var(--light-border); border-radius: 3px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all;
+}
+.rep-preview:empty { display: none; }
+.field > .grow .inline-check { cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+
 /* ===== 打印 ===== */
 @media print {
   #toolbar, #docbar, #statusbar, #modal-root { display: none !important; }

@@ -53,6 +53,7 @@
 
 <script src="../js/core.js"></script>
 <script src="../js/lang.js"></script>
+<script src="../js/textops.js"></script>
 <script src="../js/diff.js"></script>
 <script src="../js/format.js"></script>
 <script src="../js/app.js"></script>
@@ -75,6 +76,13 @@
     var wrapper = ed.getWrapperElement();
     ok('编辑器已创建', !!ed && !!ed.getWrapperElement());
     ok('工具栏已生成', document.querySelectorAll('#toolbar .tbtn').length >= 8, 'buttons=' + document.querySelectorAll('#toolbar .tbtn').length);
+
+    /* ---- 服务侧接口：/api/version 可用，说明这个页面来自「当前代码」的服务 ---- */
+    var verInfo = null;
+    try { verInfo = await (await fetch('/api/version')).json(); } catch (e) { }
+    ok('/api/version 可用（服务跑的是当前代码，翻译接口才在）',
+      !!verInfo && verInfo.app === 'sakura-like-editor' && !!verInfo.startedAt && !!verInfo.pid,
+      JSON.stringify(verInfo));
 
     /* ---- 排序 ---- */
     ed.setValue('banana\napple\ncherry\n');
@@ -1004,6 +1012,223 @@
       document.getElementById('st-msg').textContent.indexOf('比较视图') >= 0,
       'msg=' + document.getElementById('st-msg').textContent);
 
+    /* ---- 大小写转换：Alt+Q / Alt+E（含 Shift+Alt+E 备选键位） ---- */
+    SAK.App.newDoc();
+    await sleep(80);
+    ed.setValue('hello World 中文\n');
+    ed.focus();
+    press('q', { altKey: true, keyCode: 81 });
+    await sleep(80);
+    ok('Alt+Q 小写转大写', ed.getValue() === 'HELLO WORLD 中文\n', JSON.stringify(ed.getValue()));
+
+    press('e', { altKey: true, keyCode: 69 });
+    await sleep(80);
+    ok('Alt+E 大写转小写', ed.getValue() === 'hello world 中文\n', JSON.stringify(ed.getValue()));
+
+    // Chrome / Edge 会把 Alt+E 拿去开浏览器菜单，所以小写转换另有一个备选键位
+    ed.setValue('HELLO WORLD 中文\n');
+    press('e', { altKey: true, shiftKey: true, keyCode: 69 });
+    await sleep(80);
+    ok('Shift+Alt+E 是「大写转小写」的备选键位', ed.getValue() === 'hello world 中文\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('abc DEF\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 3 });
+    press('q', { altKey: true, keyCode: 81 });
+    await sleep(80);
+    ok('有选区时只转选区', ed.getValue() === 'ABC DEF\n', JSON.stringify(ed.getValue()));
+
+    ed.setValue('abc\n');
+    press('e', { altKey: true, keyCode: 69 });
+    await sleep(80);
+    ok('没有可转字符时不动文档并提示',
+      ed.getValue() === 'abc\n' && document.getElementById('st-msg').textContent.indexOf('没有大写字母') >= 0,
+      'value=' + JSON.stringify(ed.getValue()) + ' msg=' + document.getElementById('st-msg').textContent);
+
+    /* ---- 批量文字替换（Alt+R 对话框全过程） ---- */
+    function clickModalButton(modal, label) {
+      var found = null;
+      Array.prototype.forEach.call(modal.querySelectorAll('.modal-foot .btn'), function (b) {
+        if (b.textContent === label) found = b;
+      });
+      if (found) found.click();
+      return !!found;
+    }
+    function inputByLabel(modal, text) {
+      var want = text.replace(/\s+/g, '');
+      var out = null;
+      Array.prototype.forEach.call(modal.querySelectorAll('label'), function (l) {
+        if (l.textContent.replace(/\s+/g, '') === want) out = l.querySelector('input');
+      });
+      return out;
+    }
+    function typeInto(input, value) {
+      input.value = value;
+      input.dispatchEvent(new Event('input'));
+    }
+
+    SAK.settings.replaceRules = null;
+    SAK.App.newDoc();
+    await sleep(80);
+    ed.setValue('苹果 100 元\n香蕉 200 元\n');
+    var repApi = SAK.App.openReplaceDialog();
+    await sleep(100);
+    var repModal = document.querySelector('.overlay .modal');
+    ok('Alt+R 打开批量替换对话框', !!repModal && repModal.textContent.indexOf('批量文字替换') >= 0);
+
+    var ruleInputs = repModal.querySelectorAll('.rule-row input[type="text"]');
+    ok('默认给出一行「查找 / 替换为」', ruleInputs.length === 2);
+    typeInto(ruleInputs[0], '苹果');
+    typeInto(ruleInputs[1], 'Apple');
+    await sleep(260);
+    ok('预览统计命中数', repModal.querySelector('.rep-summary').textContent.indexOf('1 处匹配') >= 0,
+      repModal.querySelector('.rep-summary').textContent);
+
+    var addBtn = null;
+    Array.prototype.forEach.call(repModal.querySelectorAll('button'), function (b) {
+      if (b.textContent.indexOf('添加一条规则') >= 0) addBtn = b;
+    });
+    addBtn.click();
+    await sleep(60);
+    ruleInputs = repModal.querySelectorAll('.rule-row input[type="text"]');
+    ok('可以再加一条规则', ruleInputs.length === 4, 'inputs=' + ruleInputs.length);
+    typeInto(ruleInputs[2], '元');
+    typeInto(ruleInputs[3], 'RMB');
+    await sleep(260);
+    var counts = Array.prototype.map.call(repModal.querySelectorAll('.rep-count'), function (n) { return n.textContent; });
+    ok('每条规则各自显示命中数', counts.join('|') === '1 处|2 处', counts.join('|'));
+
+    // 正则写错时必须挡住并提示，不能瞎替换
+    var regexChk = inputByLabel(repModal, '正则表达式');
+    ok('找到「正则表达式」选项', !!regexChk);
+    regexChk.checked = true;
+    regexChk.dispatchEvent(new Event('change'));
+    typeInto(ruleInputs[0], '(');
+    await sleep(260);
+    ok('正则写错时给出提示', repModal.querySelector('.rep-summary').textContent.indexOf('正则') >= 0,
+      repModal.querySelector('.rep-summary').textContent);
+    clickModalButton(repModal, '全部替换');
+    await sleep(80);
+    ok('正则非法时不会动文档', ed.getValue() === '苹果 100 元\n香蕉 200 元\n', JSON.stringify(ed.getValue()));
+
+    regexChk.checked = false;
+    regexChk.dispatchEvent(new Event('change'));
+    typeInto(ruleInputs[0], '苹果');
+    await sleep(260);
+    clickModalButton(repModal, '全部替换');
+    await sleep(150);
+    ok('批量替换写回编辑器', ed.getValue() === 'Apple 100 RMB\n香蕉 200 RMB\n', JSON.stringify(ed.getValue()));
+    ok('规则被记住，下次打开自动带出',
+      !!SAK.settings.replaceRules && SAK.settings.replaceRules.rules.length === 2,
+      JSON.stringify(SAK.settings.replaceRules));
+    ed.undo();
+    await sleep(80);
+    ok('批量替换可一步撤销', ed.getValue() === '苹果 100 元\n香蕉 200 元\n', JSON.stringify(ed.getValue()));
+    SAK.settings.replaceRules = null;
+    SAK.saveSettings();
+
+    /* ---- 中英标点 / 全角半角（离线，不联网） ---- */
+    SAK.App.newDoc();
+    await sleep(80);
+    ed.setValue('你好，世界！这只是测试。\n');
+    var punctApi = SAK.App.openPunctDialog();
+    await sleep(100);
+    var pModal = document.querySelector('.overlay .modal');
+    ok('标点转换对话框已打开', !!pModal && pModal.textContent.indexOf('全角半角') >= 0);
+    var dirRadios = pModal.querySelectorAll('input[name="punct-dir"]');
+    ok('按内容把方向预选成「中文标点 → 英文标点」', dirRadios[0].checked, 'checked=' + dirRadios[0].checked);
+    clickModalButton(pModal, '转换');
+    await sleep(120);
+    ok('中 → 英标点写回编辑器', ed.getValue() === '你好,世界!这只是测试.\n', JSON.stringify(ed.getValue()));
+    ed.undo();
+    await sleep(80);
+    ok('标点转换可撤销', ed.getValue() === '你好，世界！这只是测试。\n', JSON.stringify(ed.getValue()));
+    punctApi.close(null);
+
+    SAK.App.newDoc();
+    await sleep(80);
+    ed.setValue('Hi, Li Ming. How are you?\n');
+    punctApi = SAK.App.openPunctDialog();
+    await sleep(100);
+    pModal = document.querySelector('.overlay .modal');
+    dirRadios = pModal.querySelectorAll('input[name="punct-dir"]');
+    dirRadios[1].checked = true;
+    dirRadios[1].dispatchEvent(new Event('change'));
+    await sleep(60);
+    clickModalButton(pModal, '转换');
+    await sleep(120);
+    ok('英文标点 → 中文标点（方向可手动选）', ed.getValue() === 'Hi， Li Ming。 How are you？\n', JSON.stringify(ed.getValue()));
+    punctApi.close(null);
+
+    /* ---- Ctrl+Shift+空格：英汉互译（用桩函数顶掉网络请求，验证整条链路） ---- */
+    SAK.App.newDoc();
+    await sleep(80);
+    var realTranslate = SAK.translate;
+    var translateCalls = [];
+    SAK.translate = function (text, target) {
+      translateCalls.push([text, target]);
+      return Promise.resolve({ text: '你好，世界', provider: '测试桩', from: 'en', to: target });
+    };
+    ed.setValue('Hello world\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 11 });
+    ed.focus();
+    press(' ', { ctrlKey: true, shiftKey: true, keyCode: 32 });
+    await sleep(250);
+    ok('Ctrl+Shift+空格 触发翻译并写回选区', ed.getValue() === '你好，世界\n', JSON.stringify(ed.getValue()));
+    ok('方向按内容判定为英文 → 中文',
+      translateCalls.length === 1 && translateCalls[0][1] === 'zh-CN', JSON.stringify(translateCalls));
+
+    // 中文选区 → 翻成英文
+    ed.setValue('这是一段中文。\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 7 });
+    press(' ', { ctrlKey: true, shiftKey: true, keyCode: 32 });
+    await sleep(250);
+    ok('中文选区翻成英文', translateCalls.length === 2 && translateCalls[1][1] === 'en', JSON.stringify(translateCalls));
+
+    // 没有选区时只提示，不动文档、也不发请求
+    ed.setValue('abc\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 0 });
+    press(' ', { ctrlKey: true, shiftKey: true, keyCode: 32 });
+    await sleep(200);
+    ok('没选中文字时只提示、不发请求',
+      ed.getValue() === 'abc\n' && translateCalls.length === 2 &&
+      document.getElementById('st-msg').textContent.indexOf('选中') >= 0,
+      'calls=' + translateCalls.length + ' msg=' + document.getElementById('st-msg').textContent);
+
+    // 超长选区要分块翻译，再按原结构拼回去（块之间不能凭空多出换行）
+    var longLine = new Array(1901).join('x') + ' y';
+    ed.setValue(longLine + '\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: longLine.length });
+    translateCalls = [];
+    SAK.translate = function (text, target) {
+      translateCalls.push([text, target]);
+      return Promise.resolve({ text: '[' + text.length + ']', provider: '测试桩' });
+    };
+    press(' ', { ctrlKey: true, shiftKey: true, keyCode: 32 });
+    await sleep(300);
+    ok('超长选区分块翻译并拼回（无多余换行）',
+      translateCalls.length === 2 && ed.getValue() === '[1800][102]\n',
+      'calls=' + translateCalls.length + ' value=' + JSON.stringify(ed.getValue()));
+
+    // 翻译失败时必须保留原文
+    ed.setValue('Hello again\n');
+    ed.setSelection({ line: 0, ch: 0 }, { line: 0, ch: 11 });
+    SAK.translate = function () { return Promise.reject(new Error('断网了')); };
+    press(' ', { ctrlKey: true, shiftKey: true, keyCode: 32 });
+    await sleep(250);
+    ok('翻译失败时原文不动并提示',
+      ed.getValue() === 'Hello again\n' && document.getElementById('st-msg').textContent.indexOf('翻译失败') >= 0,
+      'value=' + JSON.stringify(ed.getValue()) + ' msg=' + document.getElementById('st-msg').textContent);
+    SAK.translate = realTranslate;
+
+    // 工具栏按钮：即使浏览器吃掉了 Alt+E，也还能用鼠标点到
+    (function () {
+      var labels = Array.prototype.map.call(document.querySelectorAll('#toolbar .tbtn'), function (b) { return b.textContent; });
+      var want = ['大写', '小写', '替换', '翻译', '标点'];
+      var missing = want.filter(function (w) { return labels.indexOf(w) < 0; });
+      ok('工具栏有大小写 / 替换 / 翻译 / 标点按钮', missing.length === 0,
+        'missing=' + missing.join(',') + ' all=' + labels.join(','));
+    })();
+
     /* --- 键名顺序必须与 CodeMirror 的查表键名一致，否则 extraKeys 里查不到 --- */
     (function () {
       var probes = [
@@ -1011,9 +1236,17 @@
         ['format.open', 70, { ctrlKey: true, altKey: true }],
         ['file.save', 83, { ctrlKey: true }],
         ['text.dedupe', 77, { altKey: true }],
+        ['text.upper', 81, { altKey: true }],
+        ['text.lower', 69, { altKey: true }],
+        ['text.batchReplace', 82, { altKey: true }],
+        ['i18n.translate', 32, { ctrlKey: true, shiftKey: true }],
         ['edit.comment', 191, { ctrlKey: true }]
       ];
       var extra = ed.getOption('extraKeys') || {};
+      ok('别名键位（F12 / Shift+Alt+E）真的挂进了 extraKeys',
+        !!extra['F12'] && !!extra['Shift-Alt-E'],
+        'F12=' + !!extra['F12'] + ' Shift-Alt-E=' + !!extra['Shift-Alt-E'] +
+        ' keys=' + Object.keys(extra).join(','));
       var bad = probes.filter(function (p) {
         var name = SAK.App.currentKeyOf(p[0]);
         var cmName = CodeMirror.keyName(Object.assign({ keyCode: p[1] }, p[2]));

@@ -9,9 +9,15 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const translate = require('./translate');
 
 const ROOT = __dirname;
 const BASE_PORT = Number(process.env.PORT || 5173);
+
+// 给托盘 / 诊断用的自述信息：静态文件是每次请求现读磁盘的，但「进程里」的代码是启动时载入的。
+// 托盘拿 startedAt 和 server.js / translate.js 的修改时间一比，就知道自己复用的服务是不是旧代码。
+const APP_ID = 'sakura-like-editor';
+const STARTED_AT = new Date().toISOString();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -38,6 +44,65 @@ function send(res, code, type, body) {
   res.end(body);
 }
 
+function sendJson(res, code, obj) {
+  send(res, code, 'application/json; charset=utf-8', JSON.stringify(obj));
+}
+
+/* ---------- 翻译接口 ----------
+ * 页面不直接连翻译服务（跨域会被挡），统一走这里：
+ * POST /api/translate  { text, from?, to? }  →  { text, provider, from, to }
+ * 服务端按「腾讯 → 有道 → Google → MyMemory」的顺序重试，全挂才报 502。
+ */
+const MAX_TRANSLATE_CHARS = 4000;
+
+function readJsonBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('请求内容过大'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) return resolve({});
+      try { resolve(JSON.parse(raw)); }
+      catch (e) { reject(new Error('请求体不是合法 JSON')); }
+    });
+    req.on('error', (e) => reject(e));
+  });
+}
+
+async function handleTranslate(req, res) {
+  let payload;
+  try {
+    payload = await readJsonBody(req, 256 * 1024);
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  const text = String(payload.text == null ? '' : payload.text);
+  if (!text.trim()) return sendJson(res, 400, { error: '没有要翻译的文字' });
+  if (text.length > MAX_TRANSLATE_CHARS) {
+    return sendJson(res, 413, { error: '单次翻译的文字过长（上限 ' + MAX_TRANSLATE_CHARS + ' 字符）' });
+  }
+  try {
+    const r = await translate.translateText(text, payload.from || 'auto', payload.to || 'zh-CN');
+    console.log('翻译成功：' + r.provider + '，' + text.length + ' 字符');
+    return sendJson(res, 200, { text: r.text, provider: r.provider, from: r.from, to: r.to });
+  } catch (e) {
+    console.error('翻译失败：' + (e && e.message ? e.message : e) + (e && e.detail ? ' | ' + e.detail : ''));
+    return sendJson(res, 502, {
+      error: (e && e.message) || '翻译失败',
+      detail: (e && e.detail) || ''
+    });
+  }
+}
+
 const server = http.createServer((req, res) => {
   let urlPath;
   try {
@@ -46,6 +111,22 @@ const server = http.createServer((req, res) => {
     return send(res, 400, 'text/plain; charset=utf-8', '400 Bad Request');
   }
   if (urlPath === '/') urlPath = '/index.html';
+
+  if (urlPath === '/api/translate') {
+    if (req.method !== 'POST') return sendJson(res, 405, { error: '请用 POST 调用' });
+    return handleTranslate(req, res);
+  }
+
+  if (urlPath === '/api/version') {
+    const addr = server.address();
+    return sendJson(res, 200, {
+      app: APP_ID,
+      pid: process.pid,
+      startedAt: STARTED_AT,
+      node: process.version,
+      port: addr && addr.port ? addr.port : port
+    });
+  }
 
   const target = path.resolve(ROOT, '.' + urlPath);
   if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {

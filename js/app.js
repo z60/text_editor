@@ -69,6 +69,18 @@
     { id: 'format.open', group: '文本处理', label: '格式化代码', key: 'Ctrl-Alt-F', run: function () { openFormatDialog(); } },
     { id: 'lang.detect', group: '文本处理', label: '重新识别代码语言', key: '', run: function () { detectNow(); } },
 
+    { id: 'text.upper', group: '文本转换', label: '小写字母转大写', key: 'Alt-Q', run: function (cm) { convertCase('upper', cm); } },
+    { id: 'text.lower', group: '文本转换', label: '大写字母转小写', key: 'Alt-E', run: function (cm) { convertCase('lower', cm); } },
+    { id: 'text.batchReplace', group: '文本转换', label: '批量文字替换', key: 'Alt-R', run: function () { openReplaceDialog(); } },
+    {
+      id: 'i18n.translate', group: '文本转换', label: '选中文字英汉互译（联网）', key: 'Shift-Ctrl-Space',
+      run: function (cm) { translateSelection(cm); }
+    },
+    {
+      id: 'i18n.punct', group: '文本转换', label: '中英标点 / 全角半角转换（离线）', key: '',
+      run: function () { openPunctDialog(); }
+    },
+
     { id: 'merge.open', group: '比较合并', label: '选择两个文件开始比较 / 合并', key: 'Ctrl-Alt-M', run: function () { openMergeDialog(); } },
     { id: 'merge.next', group: '比较合并', label: '跳到下一处差异', key: 'F7', run: function () { gotoHunk(merge.idx + 1); } },
     { id: 'merge.prev', group: '比较合并', label: '跳到上一处差异', key: 'Shift-F7', run: function () { gotoHunk(merge.idx - 1); } },
@@ -89,7 +101,10 @@
 
   // 额外别名键：默认键位之外，这些键也触发同一个命令（设置界面里显示的仍是默认键位）
   var KEY_ALIASES = {
-    'merge.anchor': ['F12']       // 行对齐起点：默认 F2，F12 也认（两个键都放行）
+    'merge.anchor': ['F12'],       // 行对齐起点：默认 F2，F12 也认（两个键都放行）
+    // Chrome / Edge 在 Windows 上把 Alt+E 拿去开浏览器菜单了，页面拦截不住，
+    // 所以给它留一个同样顺手的备选键位
+    'text.lower': ['Shift-Alt-E']
   };
 
   function commandById(id) { return CMD_BY_ID[id] || null; }
@@ -489,6 +504,332 @@
     if (!out.length) out = [''];
     replaceLines(cm, r, out, '+dedupe');
     SAK.msg('去重：删除 ' + removed + ' 行重复内容' + (r.hasSelection ? '（选区）' : '（全文）'));
+  }
+
+  /* ================================================================== *
+   * 文本转换：大小写 / 批量替换 / 中英互译 / 标点全角半角
+   * ================================================================== */
+  /** 全局分发时传进来的是主编辑器；比较视图下应该落在当前焦点那一侧 */
+  function targetEditor(cm) {
+    if (merge.on) return focusedEditor();
+    return cm || ed;
+  }
+
+  /**
+   * 把一个「文字 → 结果」的转换作用到选区（没有选区就是全文）
+   * fn(text) 返回 { text, count }；opts: { origin, noChange, done }
+   */
+  function applyTextOp(cm, fn, opts) {
+    cm = targetEditor(cm);
+    if (!cm) return null;
+    var sel = cm.getSelection();
+    var hasSel = sel.length > 0;
+    var text = hasSel ? sel : cm.getValue();
+    if (!text) { SAK.msg('没有可转换的内容'); return null; }
+    var result = fn(text);
+    if (!result.count) { SAK.msg(opts.noChange); return null; }
+    writeBack(cm, result.text, hasSel, opts.origin);
+    SAK.msg(opts.done(result, hasSel), 6000);
+    return result;
+  }
+
+  /** 选区有内容就替换选区，否则替换整个文档；都记为一步可撤销的操作 */
+  function writeBack(cm, text, useSelection, origin) {
+    cm.operation(function () {
+      if (useSelection) {
+        cm.replaceSelection(text, 'around', origin);
+      } else {
+        var last = cm.lastLine();
+        cm.replaceRange(text, { line: cm.firstLine(), ch: 0 },
+          { line: last, ch: cm.getLine(last).length }, origin);
+      }
+    });
+    updateStatus();
+  }
+
+  function convertCase(dir, cm) {
+    var up = dir === 'upper';
+    applyTextOp(cm, up ? SAK.textops.toUpper : SAK.textops.toLower, {
+      origin: up ? '+upper' : '+lower',
+      noChange: up ? '没有小写字母需要转成大写' : '没有大写字母需要转成小写',
+      done: function (r, hasSel) {
+        return (up ? '小写 → 大写' : '大写 → 小写') + '：转换 ' + r.count + ' 个字符'
+          + (hasSel ? '（选区）' : '（全文）') + '，Ctrl+Z 可撤销';
+      }
+    });
+  }
+
+  /* ---------- 英汉互译（联网，走本地 /api/translate） ---------- */
+  async function translateSelection(cm) {
+    cm = targetEditor(cm);
+    if (!cm) return null;
+    var sel = cm.getSelection();
+    if (!sel.trim()) { SAK.error('请先选中要翻译的文字，再按 Ctrl+Shift+空格'); return null; }
+    var target = SAK.textops.detectTranslateTarget(sel);
+    var dirLabel = target === 'en' ? '中文 → 英文' : '英文 → 中文';
+    var parts = SAK.textops.splitForTranslate(sel);
+    var out = [], provider = '';
+    SAK.msg('正在翻译（' + dirLabel + '）…', 60000);
+    try {
+      for (var i = 0; i < parts.length; i++) {
+        if (parts.length > 1) SAK.msg('正在翻译（' + dirLabel + '）… ' + (i + 1) + '/' + parts.length, 60000);
+        var r = await SAK.translate(parts[i].text, target);
+        provider = provider || r.provider || '';
+        out.push({ text: String(r.text).replace(/[ \t]+$/, ''), sep: parts[i].sep });
+      }
+    } catch (e) {
+      SAK.error('翻译失败：' + ((e && e.message) || e) + '；离线可用「中英标点 / 全角半角转换」');
+      return null;
+    }
+    var result = out.map(function (p, i) { return (i ? p.sep : '') + p.text; }).join('');
+    writeBack(cm, result, true, '+translate');
+    SAK.msg('翻译完成（' + dirLabel + (provider ? '，' + provider : '') + '），Ctrl+Z 可撤销', 8000);
+    return result;
+  }
+
+  /* ---------- 批量文字替换（Alt+R） ---------- */
+  function openReplaceDialog(cm) {
+    cm = targetEditor(cm);
+    if (!cm) return null;
+    var sel = cm.getSelection();
+    var hasSel = sel.length > 0;
+    var saved = SAK.settings.replaceRules || null;
+
+    var list = el('div', { class: 'rule-list' });
+    var rows = [];
+    var refreshSoon = SAK.debounce(function () { refresh(); }, 160);
+
+    function addRow(find, to) {
+      var findInput = el('input', { type: 'text', class: 'grow', placeholder: '查找内容（换行写 \\n）', value: find || '' });
+      var toInput = el('input', { type: 'text', class: 'grow', placeholder: '替换为（留空 = 删除）', value: to || '' });
+      var delBtn = el('button', { type: 'button', class: 'linkbtn', title: '删除这条规则', text: '✕' });
+      var cnt = el('span', { class: 'rep-count' });
+      var row = el('div', { class: 'rule-row' }, [findInput, toInput, delBtn, cnt]);
+      var entry = { find: findInput, to: toInput, el: row, count: cnt };
+      delBtn.addEventListener('click', function () {
+        if (rows.length <= 1) { findInput.value = ''; toInput.value = ''; refresh(); return; }
+        var i = rows.indexOf(entry);
+        if (i >= 0) rows.splice(i, 1);
+        row.remove();
+        refresh();
+      });
+      findInput.addEventListener('input', refreshSoon);
+      toInput.addEventListener('input', refreshSoon);
+      rows.push(entry);
+      list.appendChild(row);
+      return entry;
+    }
+
+    var caseSensitive = el('input', { type: 'checkbox' });
+    var useRegex = el('input', { type: 'checkbox' });
+    var scopeAll = el('input', { type: 'radio', name: 'rep-scope', value: 'all' });
+    var scopeSel = el('input', { type: 'radio', name: 'rep-scope', value: 'sel' });
+    scopeAll.checked = !hasSel;
+    scopeSel.checked = hasSel;
+    scopeSel.disabled = !hasSel;
+    var summary = el('div', { class: 'rep-summary' });
+    var preview = el('pre', { class: 'rep-preview' });
+
+    function options() { return { caseSensitive: caseSensitive.checked, regex: useRegex.checked }; }
+    function curRules() { return rows.map(function (r) { return { find: r.find.value, to: r.to.value }; }); }
+    function inSelection() { return scopeSel.checked && hasSel; }
+    function scopeText() { return inSelection() ? cm.getSelection() : cm.getValue(); }
+
+    function refresh() {
+      var opts = options(), rs = curRules(), text = scopeText();
+      var badAt = -1, badMsg = '';
+      rs.forEach(function (r, i) {
+        if (!r.find) return;
+        try { SAK.textops.compileFind(r.find, opts); }
+        catch (e) { if (badAt < 0) { badAt = i; badMsg = e.message; } }
+      });
+      if (badAt >= 0) {
+        rows.forEach(function (r, i) {
+          r.el.classList.toggle('bad', i === badAt);
+          r.count.textContent = i === badAt ? '⚠ 正则错误' : '';
+        });
+        summary.innerHTML = '<span class="warn">⚠ 第 ' + (badAt + 1) + ' 条规则的正则有问题：' + SAK.escapeHtml(badMsg) + '</span>';
+        preview.textContent = '';
+        return;
+      }
+      var res = SAK.textops.batchReplace(text, rs, opts);
+      rows.forEach(function (r, i) {
+        r.el.classList.remove('bad');
+        r.count.textContent = res.perRule[i] ? (res.perRule[i] + ' 处') : '';
+      });
+      var active = rs.filter(function (r) { return r.find; }).length;
+      if (!active) {
+        summary.textContent = '左边填「查找内容」，右边填「替换为」，一次可以加多条规则，按从上到下的顺序依次应用';
+      } else {
+        summary.innerHTML = '共 <b>' + res.count + '</b> 处匹配 · ' + active + ' 条规则 · '
+          + (inSelection() ? '范围：当前选区' : '范围：整个文档');
+      }
+      if (!res.count) { preview.textContent = ''; return; }
+      var idx = SAK.textops.firstDiff(text, res.text);
+      var start = Math.max(0, idx - 120);
+      var piece = res.text.substr(start, 700);
+      preview.textContent = (start > 0 ? '…' : '') + piece + (start + 700 < res.text.length ? '\n…（仅预览改动附近）' : '');
+    }
+
+    function doApply(m) {
+      var opts = options();
+      var rs = curRules().filter(function (r) { return r.find; });
+      if (!rs.length) { SAK.error('请先填写「查找内容」'); return; }
+      var useSel = inSelection();
+      var text = scopeText();
+      var res;
+      try { res = SAK.textops.batchReplace(text, rs, opts); }
+      catch (e) { SAK.error('替换失败：' + ((e && e.message) || e)); return; }
+      // 记住这次的规则，下次按 Alt+R 直接就是这一套
+      SAK.settings.replaceRules = {
+        caseSensitive: caseSensitive.checked,
+        regex: useRegex.checked,
+        rules: rs.map(function (r) { return { find: r.find, to: r.to }; })
+      };
+      SAK.saveSettings();
+      if (!res.count) { SAK.msg('没有匹配到内容，文档未改动'); m.close(null); return; }
+      writeBack(cm, res.text, useSel, '+batchReplace');
+      m.close(null);
+      SAK.msg('批量替换完成：' + rs.length + ' 条规则共替换 ' + res.count + ' 处（Ctrl+Z 可撤销）', 7000);
+    }
+
+    var initial = (saved && saved.rules && saved.rules.length) ? saved.rules : [{ find: '', to: '' }];
+    initial.forEach(function (r) { addRow(r.find, r.to); });
+    if (saved) { caseSensitive.checked = !!saved.caseSensitive; useRegex.checked = !!saved.regex; }
+    [caseSensitive, useRegex, scopeAll, scopeSel].forEach(function (n) { n.addEventListener('change', refresh); });
+
+    var body = el('div', { style: { width: '560px' } }, [
+      el('div', { class: 'field' }, [
+        el('label', { text: '替换规则' }),
+        el('div', { class: 'grow' }, [
+          list,
+          el('button', {
+            type: 'button', class: 'linkbtn', text: '＋ 添加一条规则',
+            onclick: function () { addRow('', '').find.focus(); refresh(); }
+          })
+        ])
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { text: '选项' }),
+        el('div', { class: 'grow inline-radio' }, [
+          el('label', {}, [caseSensitive, '区分大小写']),
+          el('label', {}, [useRegex, '正则表达式']),
+          el('label', {}, [scopeAll, '整个文档']),
+          el('label', {}, [scopeSel, hasSel ? '当前选区' : '当前选区（无选区）'])
+        ])
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { text: '预览' }),
+        el('div', { class: 'grow' }, [summary, preview])
+      ])
+    ]);
+    refresh();
+
+    return SAK.modal({
+      title: '批量文字替换  (Alt+R)',
+      width: '640px',
+      body: body,
+      buttons: [
+        {
+          label: '清空规则', onClick: function () {
+            rows.slice().forEach(function (r) { r.el.remove(); });
+            rows.length = 0;
+            addRow('', '').find.focus();
+            refresh();
+          }
+        },
+        { label: '取消', onClick: function (m) { m.close(null); } },
+        { label: '全部替换', primary: true, onClick: function (m) { doApply(m); } }
+      ]
+    });
+  }
+
+  /* ---------- 中英标点 / 全角半角转换（离线） ---------- */
+  function openPunctDialog(cm) {
+    cm = targetEditor(cm);
+    if (!cm) return null;
+    var sel = cm.getSelection();
+    var hasSel = sel.length > 0;
+    var sample = hasSel ? sel : cm.getValue();
+    if (!sample.trim()) { SAK.msg('没有可转换的内容'); return null; }
+
+    // 按内容猜一个方向：中文居多就按「中 → 英」标点处理，反之亦然（可以手动改）
+    var guess = SAK.textops.detectTranslateTarget(sample) === 'en' ? 'zh2en' : 'en2zh';
+    var zh2en = el('input', { type: 'radio', name: 'punct-dir', value: 'zh2en' });
+    var en2zh = el('input', { type: 'radio', name: 'punct-dir', value: 'en2zh' });
+    if (guess === 'zh2en') zh2en.checked = true; else en2zh.checked = true;
+
+    var alnum = el('input', { type: 'checkbox' });
+    var scopeAll = el('input', { type: 'radio', name: 'punct-scope', value: 'all' });
+    var scopeSel = el('input', { type: 'radio', name: 'punct-scope', value: 'sel' });
+    scopeAll.checked = !hasSel;
+    scopeSel.checked = hasSel;
+    scopeSel.disabled = !hasSel;
+    var info = el('div', { class: 'plan-info' });
+    var preview = el('pre', { class: 'rep-preview' });
+
+    function dirNow() { return zh2en.checked ? 'zh2en' : 'en2zh'; }
+    function inSelection() { return scopeSel.checked && hasSel; }
+
+    function refresh() {
+      var dir = dirNow();
+      var text = inSelection() ? cm.getSelection() : cm.getValue();
+      var r = SAK.textops.convertPunctuation(text, dir, { alnum: alnum.checked });
+      info.innerHTML = '将改 <b>' + r.count + '</b> 个字符 · <b>' + (dir === 'zh2en' ? '中文标点 → 英文标点' : '英文标点 → 中文标点') + '</b>'
+        + '<div class="dim">' + (dir === 'zh2en'
+          ? '，。！？；：、（）【】《》和全角空格 / 引号都会换成英文写法。'
+          : ',.!?;:()[] 和引号会换成中文写法；小数点（3.14）、千分位逗号（1,000）、时间（10:30）这类会原样保留。') + '</div>';
+      if (!r.count) { preview.textContent = ''; return; }
+      var idx = SAK.textops.firstDiff(text, r.text);
+      var start = Math.max(0, idx - 120);
+      preview.textContent = (start > 0 ? '…' : '') + r.text.substr(start, 600);
+    }
+
+    var body = el('div', { style: { width: '520px' } }, [
+      el('div', { class: 'field' }, [
+        el('label', { text: '转换方向' }),
+        el('div', { class: 'grow inline-radio' }, [
+          el('label', {}, [zh2en, '中文标点 → 英文标点']),
+          el('label', {}, [en2zh, '英文标点 → 中文标点'])
+        ])
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { text: '范围' }),
+        el('div', { class: 'grow inline-radio' }, [
+          el('label', {}, [scopeAll, '整个文档']),
+          el('label', {}, [scopeSel, hasSel ? '当前选区' : '当前选区（无选区）'])
+        ])
+      ]),
+      el('div', { class: 'field' }, [
+        el('label', { text: '附加' }),
+        el('div', { class: 'grow' }, [
+          el('label', { class: 'inline-check' }, [alnum, '字母数字也一起转全角 / 半角（ＡＢＣ ↔ ABC）'])
+        ])
+      ]),
+      el('div', { class: 'field' }, [el('label', { text: '预览' }), el('div', { class: 'grow' }, [info, preview])])
+    ]);
+
+    [zh2en, en2zh, alnum, scopeAll, scopeSel].forEach(function (n) { n.addEventListener('change', refresh); });
+    refresh();
+
+    return SAK.modal({
+      title: '中英标点 / 全角半角转换（离线）',
+      width: '600px',
+      body: body,
+      buttons: [
+        { label: '取消', onClick: function (m) { m.close(null); } },
+        {
+          label: '转换', primary: true, onClick: function (m) {
+            var text = inSelection() ? cm.getSelection() : cm.getValue();
+            var r = SAK.textops.convertPunctuation(text, dirNow(), { alnum: alnum.checked });
+            m.close(null);
+            if (!r.count) { SAK.msg('没有需要转换的标点'); return; }
+            writeBack(cm, r.text, inSelection(), '+punct');
+            SAK.msg('标点转换完成：改动 ' + r.count + ' 个字符（Ctrl+Z 可撤销）', 6000);
+          }
+        }
+      ]
+    });
   }
 
   /* ================================================================== *
@@ -1953,6 +2294,11 @@
     bar.appendChild(btn('排序↑', '按行升序 (Ctrl+Alt+A)', function () { sortLines('asc'); }));
     bar.appendChild(btn('排序↓', '按行降序 (Ctrl+Alt+D)', function () { sortLines('desc'); }));
     bar.appendChild(btn('去重', '删除重复行 (Alt+M)', function () { dedupeLines(); }));
+    bar.appendChild(btn('大写', '选中的小写字母转大写 (Alt+Q)', function () { convertCase('upper'); }));
+    bar.appendChild(btn('小写', '选中的大写字母转小写 (Alt+E / Shift+Alt+E)', function () { convertCase('lower'); }));
+    bar.appendChild(btn('替换', '批量文字替换 (Alt+R)', function () { openReplaceDialog(); }));
+    bar.appendChild(btn('翻译', '选中文字英汉互译，需要联网 (Ctrl+Shift+空格)', function () { translateSelection(); }));
+    bar.appendChild(btn('标点', '中英标点 / 全角半角转换，离线可用', function () { openPunctDialog(); }));
     bar.appendChild(sep());
 
     bar.appendChild(btn('比较', '选择两个文件做双栏比较 / 合并 (Ctrl+Alt+M)', openMergeDialog));
@@ -2067,6 +2413,8 @@
     get editor() { return ed; },
     newDoc: newDoc, openFiles: openFiles, saveDoc: saveDoc,
     sortLines: sortLines, dedupeLines: dedupeLines,
+    convertCase: convertCase, translateSelection: translateSelection,
+    openReplaceDialog: openReplaceDialog, openPunctDialog: openPunctDialog,
     openFormatDialog: openFormatDialog, openKeymapDialog: openKeymapDialog, openHelp: showHelp,
     openMergeDialog: openMergeDialog, startMerge: startMerge, exitMerge: exitMerge,
     runDiff: runDiff, gotoHunk: gotoHunk, applyHunk: applyHunk,

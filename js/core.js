@@ -57,7 +57,8 @@ window.SAK = window.SAK || {};
     highlightActiveLine: true,
     autoDetect: true,
     printWidth: 100,
-    keymap: {}          // 快捷键覆盖：{ 命令id: "Ctrl-Alt-A" }，空串表示已清空
+    keymap: {},          // 快捷键覆盖：{ 命令id: "Ctrl-Alt-A" }，空串表示已清空
+    replaceRules: null   // 记忆上次用过的批量替换规则 { caseSensitive, regex, rules: [{find, to}] }
   };
   var settings = Object.assign({}, DEFAULT_SETTINGS);
   try {
@@ -391,6 +392,38 @@ window.SAK = window.SAK || {};
       setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
       return false;
     }
+  };
+
+  /* ---------- 翻译（交给本地服务端的 /api/translate 去连翻译服务） ---------- */
+  /**
+   * @param {string} text   要翻译的文字
+   * @param {string} target 'zh-CN' | 'en'
+   * @returns {Promise<{text:string, provider:string, from:string, to:string}>}
+   */
+  SAK.translate = function (text, target, from) {
+    var body = JSON.stringify({ text: String(text == null ? '' : text), from: from || 'auto', to: target || 'zh-CN' });
+    return fetch(resolveUrl('api/translate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body
+    }).then(function (res) {
+      return res.text().then(function (raw) {
+        var data = {};
+        try { data = JSON.parse(raw) || {}; } catch (e) { }
+        if (!res.ok) {
+          var msg = data.error || ('HTTP ' + res.status);
+          if (res.status === 404) {
+            msg = '本地服务还在跑旧代码（没有翻译接口）：在托盘图标上右键「重启编辑器服务」'
+              + '（或重新双击托盘图标 / 重跑 start-editor.bat），再刷新本页即可';
+          }
+          throw new Error(msg + (data.detail ? '（' + data.detail + '）' : ''));
+        }
+        if (!data.text) throw new Error('翻译服务返回了空结果');
+        return data;
+      });
+    }, function () {
+      throw new Error('连不上本地翻译接口，请通过 start-editor.bat（node server.js）打开页面');
+    });
   };
 
   /* ---------- 粘贴进来的文件（可点击路径） ---------- */

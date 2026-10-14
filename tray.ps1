@@ -7,11 +7,13 @@
   用法：
     powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1            启动托盘
     powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Open      只打开编辑器（不起托盘）
+    powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Status    只看服务状态（不动进程）
     powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Install   安装开机自启
     powershell -NoProfile -ExecutionPolicy Bypass -File tray.ps1 -Uninstall 取消开机自启
 #>
 param(
   [switch]$Open,
+  [switch]$Status,
   [switch]$Install,
   [switch]$Uninstall
 )
@@ -29,6 +31,10 @@ Set-Location $Root
 $PortFile = Join-Path $Root '.server-port'
 $IconPath = Join-Path $Root 'icon.ico'
 $VbsPath = Join-Path $Root 'start-tray.vbs'
+$CheckPath = Join-Path $Root 'server-check.ps1'
+
+# 端口探测 / 新旧代码判定都放在这个小模块里（它也能单独跑：-File server-check.ps1）
+. $CheckPath -Root $Root
 # 快捷方式文件名必须用 ASCII：本机 ANSI 代码页是 932（日文），WScript.Shell
 # 保存快捷方式时会把路径转成 ANSI，「编」字无法表示会变成「?」导致保存失败。
 $LnkName = 'TextEditor.lnk'
@@ -87,35 +93,8 @@ function Set-AutoStart([bool]$on) {
 }
 
 # ---------- 服务端口 ----------
-function Get-Url {
-  if (Test-Path $PortFile) {
-    $p = ''
-    try { $p = (Get-Content $PortFile -Raw).Trim() } catch { $p = '' }
-    if ($p -match '^\d+$') { return "http://127.0.0.1:$p/" }
-  }
-  return 'http://127.0.0.1:5173/'
-}
-
-function Test-Server([string]$url) {
-  try {
-    $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
-    return ($r.StatusCode -eq 200)
-  } catch { return $false }
-}
-
-# 找已经在跑的服务：先看端口文件记的端口，再看默认端口 5173。
-# 只看端口文件的话，文件过期（比如上次被强制结束后没清掉）就会误判成「没有服务」，
-# 于是又起一个，机器上就并排躺着两个服务了。
-function Find-RunningServer {
-  $url = Get-Url
-  if (Test-Server $url) { return $url }
-  $fallback = 'http://127.0.0.1:5173/'
-  if ($url -ne $fallback -and (Test-Server $fallback)) {
-    try { Set-Content -Path $PortFile -Value '5173' -NoNewline -Encoding ascii } catch { }
-    return $fallback
-  }
-  return ''
-}
+# Get-EditorUrl / Test-Server / Test-FreshServer / Find-RunningServer / Stop-StaleServer
+# 都在 server-check.ps1 里（见文件开头的点源）。这里只管「起一个自己的服务」和菜单动作。
 
 function Start-Server {
   $running = Find-RunningServer
@@ -125,11 +104,14 @@ function Start-Server {
     [System.Windows.Forms.MessageBox]::Show('未找到 Node.js，请先安装 Node.js 18 或更高版本。', $AppName) | Out-Null
     return $null
   }
+  # 没找到可用的服务（可能刚把旧代码的服务换掉）：清掉可能指向旧端口的端口文件。
+  # 不清的话，新服务换了端口后下面的等待循环会一直读旧端口，误报「启动失败」。
+  try { Remove-Item -LiteralPath $PortFile -Force -ErrorAction SilentlyContinue } catch { }
   $env:NO_OPEN = '1'          # 由托盘负责打开浏览器，避免打开两次
   $script:ServerProc = Start-Process -FilePath $node.Source -ArgumentList 'server.js' -WorkingDirectory $Root -WindowStyle Hidden -PassThru
   for ($i = 0; $i -lt 80; $i++) {
     Start-Sleep -Milliseconds 200
-    $u = Get-Url
+    $u = Get-EditorUrl
     if (Test-Server $u) { return $u }
   }
   return $null
@@ -144,14 +126,26 @@ function Stop-Server {
       return
     } catch { }
   }
+  # 不是托盘起的（比如上次开机自启留下的）也要能停掉
+  $u = Get-EditorUrl
+  if ((Test-Server $u) -and (Stop-StaleServer $u)) {
+    $script:ServerProc = $null
+    $tray.ShowBalloonTip(2500, $AppName, '编辑器服务已停止', 'Info')
+    return
+  }
   [System.Windows.Forms.MessageBox]::Show(
     '当前没有由托盘启动的服务。' + "`n" + '（如果服务是别的窗口启动的，关掉那个窗口即可）', $AppName) | Out-Null
 }
 
 function Open-Editor {
+  $replaced = $false
   $url = Start-Server
   if ($url) {
+    if (Test-StaleReplaced) { $replaced = $true }
     Start-Process $url
+    if ($replaced -and $tray) {
+      $tray.ShowBalloonTip(3000, $AppName, '发现正在跑的服务是改动前启动的旧代码，已自动换成当前代码的服务。', 'Info')
+    }
   } else {
     [System.Windows.Forms.MessageBox]::Show('启动失败：服务没有在预期时间内就绪。' + "`n" +
       '可以在项目文件夹里双击「start-editor.bat」查看具体错误。', $AppName) | Out-Null
@@ -173,6 +167,11 @@ if ($Install -or $Uninstall) {
 if ($Open) {
   New-IconFile
   Open-Editor
+  exit 0
+}
+
+if ($Status) {
+  Show-ServerStatus
   exit 0
 }
 
@@ -205,6 +204,7 @@ $tray.Text = "$AppName - 双击打开"
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miOpen = $menu.Items.Add('打开文本编辑器')
+$miRestart = $menu.Items.Add('重启编辑器服务')
 $miStop = $menu.Items.Add('停止编辑器服务')
 $miFolder = $menu.Items.Add('打开项目文件夹')
 $null = $menu.Items.Add('-')
@@ -216,6 +216,24 @@ $null = $menu.Items.Add('-')
 $miExit = $menu.Items.Add('退出')
 
 $miOpen.add_Click({ Open-Editor })
+$miRestart.add_Click({
+    # 改完代码（尤其 server.js / translate.js）后，用这个手动把服务换成当前代码
+    try {
+      $u = Get-EditorUrl
+      if (Test-Server $u) { $null = Stop-StaleServer $u }
+      $script:ServerProc = $null
+      try { Remove-Item -LiteralPath $PortFile -Force -ErrorAction SilentlyContinue } catch { }
+      $nurl = Start-Server
+      if ($nurl) {
+        $tray.ShowBalloonTip(3000, $AppName, "服务已重启：$nurl", 'Info')
+      } else {
+        [System.Windows.Forms.MessageBox]::Show('重启失败：服务没有在预期时间内就绪。' + "`n" +
+          '可以在项目文件夹里双击「start-editor.bat」查看具体错误。', $AppName) | Out-Null
+      }
+    } catch {
+      [System.Windows.Forms.MessageBox]::Show("重启服务失败：`n$($_.Exception.Message)", $AppName) | Out-Null
+    }
+  })
 $miStop.add_Click({ Stop-Server })
 $miFolder.add_Click({ Start-Process explorer.exe $Root })
 $miAuto.add_Click({
